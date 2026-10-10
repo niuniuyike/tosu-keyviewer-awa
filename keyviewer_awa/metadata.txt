@@ -1,0 +1,5 @@
+name: keyviewer_awa
+author: awa
+version: 1.0.0
+resolution: 160x480
+authorlinks: https://github.com/tosuapp/tosu

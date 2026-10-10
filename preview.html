@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <title>keyviewer_awa preview</title>
+        <style>
+            html,
+            body {
+                margin: 0;
+                padding: 0;
+                height: 100%;
+                background: #17181c;
+                color: #e8e8ea;
+                font-family: 'Segoe UI', Roboto, 'Microsoft YaHei', Arial, sans-serif;
+                overflow: hidden;
+            }
+
+            #bar {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 10px;
+                background: #22242a;
+                border-bottom: 1px solid #33363f;
+                flex-wrap: wrap;
+                font-size: 12px;
+            }
+
+            #bar2 {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 10px;
+                background: #1d1f25;
+                border-bottom: 1px solid #33363f;
+                flex-wrap: wrap;
+                font-size: 12px;
+            }
+
+            button,
+            input {
+                font: inherit;
+                font-size: 12px;
+                color: #e8e8ea;
+                background: #2c2f37;
+                border: 1px solid #3d414c;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+
+            button:hover {
+                background: #363a45;
+                cursor: pointer;
+            }
+
+            button.on {
+                background: #b93a72;
+                border-color: #d4548c;
+            }
+
+            #state {
+                font: 11px/1.5 Consolas, monospace;
+                color: #8fe3a5;
+                padding: 4px 10px;
+                background: #1b1d22;
+                border-bottom: 1px solid #33363f;
+                white-space: pre-wrap;
+            }
+
+            #wrap {
+                position: relative;
+                height: calc(100% - 112px);
+                overflow: hidden;
+                /* checkerboard makes transparency obvious */
+                background-image: linear-gradient(45deg, #26282e 25%, transparent 25%),
+                    linear-gradient(-45deg, #26282e 25%, transparent 25%),
+                    linear-gradient(45deg, transparent 75%, #26282e 75%),
+                    linear-gradient(-45deg, transparent 75%, #26282e 75%);
+                background-size: 20px 20px;
+                background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+                background-color: #1e2025;
+            }
+
+            #stage {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 160px;
+                height: 480px;
+                background: transparent;
+                outline: 1px dashed #5a6070;
+                overflow: hidden;
+            }
+
+            #stage iframe {
+                display: block;
+                width: 100%;
+                height: 100%;
+                border: 0;
+                background: transparent;
+            }
+
+            #grip {
+                position: absolute;
+                right: -6px;
+                bottom: -6px;
+                width: 14px;
+                height: 14px;
+                background: #d4548c;
+                border-radius: 3px;
+                cursor: nwse-resize;
+                z-index: 5;
+            }
+
+            #grip2 {
+                position: absolute;
+                right: -6px;
+                top: 6px;
+                width: 14px;
+                height: 14px;
+                background: #4a90d9;
+                border-radius: 3px;
+                cursor: ew-resize;
+                z-index: 5;
+            }
+
+            #grip3 {
+                position: absolute;
+                left: -6px;
+                bottom: 6px;
+                width: 14px;
+                height: 14px;
+                background: #7bc86c;
+                border-radius: 3px;
+                cursor: ns-resize;
+                z-index: 5;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="bar">
+            <button id="load">重新加载 Overlay</button>
+            <label><input id="w" type="number" value="160" style="width: 64px" /> 宽</label>
+            <label><input id="h" type="number" value="480" style="width: 64px" /> 高</label>
+            <span>|</span>
+            <button data-press="KeyZ">按下 Z</button>
+            <button data-press="KeyX">按下 X</button>
+            <button data-press="KeyC">按下 C</button>
+            <button data-press="KeyV">按下 V</button>
+            <button id="release">全部松开</button>
+            <span>|</span>
+            <button id="reset">恢复设置默认值</button>
+            <span>|</span>
+            <button data-size="120x420">120x420</button>
+            <button data-size="240x600">240x600</button>
+            <button data-size="420x420">420x420</button>
+            <button data-size="80x260">80x260</button>
+            <span>|</span>
+            <button data-scene="multi">演示：6 键 + 小键盘</button>
+            <button data-scene="big">演示：宽条键雨</button>
+            <button data-scene="blocks">演示：独立方块键雨</button>
+        </div>
+        <div id="bar2">
+            <span style="color:#9aa0ad">tosu 数据源（假服务端 /websocket/v2/precise）：</span>
+            <button data-game="k1">k1</button>
+            <button data-game="k2">k2</button>
+            <button data-game="m1">m1</button>
+            <button data-game="m2">m2</button>
+            <button id="gamestop">全部松开</button>
+            <button id="auto2">自动敲击</button>
+            <span>|</span>
+            <button data-mode="auto">inputMode=auto</button>
+            <button data-mode="keyboard">inputMode=keyboard</button>
+            <button data-mode="game">inputMode=game</button>
+            <span>|</span>
+            <button data-list="k1\nk2\nm1\nm2">键位列表 = k1/k2/m1/m2</button>
+        </div>
+        <div id="state">loading…</div>
+        <div id="wrap">
+            <div id="stage">
+                <div id="grip3" title="改高度"></div>
+                <div id="grip2" title="改宽度"></div>
+                <div id="grip" title="改大小"></div>
+            </div>
+        </div>
+
+        <script>
+            var stage = document.getElementById('stage');
+            var stateEl = document.getElementById('state');
+            var wInput = document.getElementById('w');
+            var hInput = document.getElementById('h');
+            var overlayFrame = null;
+
+            function currentOverlay() {
+                var params = new URLSearchParams(location.search);
+                return params.get('overlay') || 'keyviewer_awa';
+            }
+
+            /* forward ?config=<json> to the overlay, so the overlay applies it after
+               its own settings.json read instead of the preview racing that read */
+            function configQuery() {
+                var params = new URLSearchParams(location.search);
+                var config = params.get('config');
+                if (!config) return '';
+                return '&config=' + encodeURIComponent(config);
+            }
+
+            function loadOverlay() {
+                var overlay = currentOverlay();
+                var width = parseInt(wInput.value, 10) || 160;
+                var height = parseInt(hInput.value, 10) || 480;
+                stage.style.width = width + 'px';
+                stage.style.height = height + 'px';
+
+                var old = stage.querySelector('iframe');
+                if (old) stage.removeChild(old);
+
+                var frame = document.createElement('iframe');
+                frame.src =
+                    '/' +
+                    overlay +
+                    '/index.html?debug=1&press=' +
+                    encodeURIComponent('KeyZ,KeyX') +
+                    configQuery();
+                frame.scrolling = 'no';
+                frame.allow = 'autoplay';
+                frame.addEventListener('load', function () {
+                    overlayFrame = frame.contentWindow;
+                    try {
+                        window.overlay = overlayFrame.keyviewer;
+                    } catch (error) {
+                        /* ignore */
+                    }
+                });
+                stage.appendChild(frame);
+                overlayFrame = null;
+
+                /* the overlay boots asynchronously, so pick up its hook as soon as
+                   it exists instead of relying on the load event alone */
+                var waited = 0;
+                (function waitForHook() {
+                    try {
+                        if (frame.contentWindow && frame.contentWindow.keyviewer) {
+                            overlayFrame = frame.contentWindow;
+                            window.overlay = overlayFrame.keyviewer;
+                            return;
+                        }
+                    } catch (error) {
+                        /* cross-origin during teardown; keep polling */
+                    }
+                    if ((waited += 50) < 5000) setTimeout(waitForHook, 50);
+                })();
+            }
+
+            function withOverlay(fn) {
+                if (!overlayFrame || !overlayFrame.keyviewer) {
+                    return false;
+                }
+                fn(overlayFrame.keyviewer);
+                return true;
+            }
+
+            document.getElementById('load').addEventListener('click', loadOverlay);
+            wInput.addEventListener('change', loadOverlay);
+            hInput.addEventListener('change', loadOverlay);
+
+            document.querySelectorAll('[data-press]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    var code = button.getAttribute('data-press');
+                    var active = button.classList.toggle('on');
+                    withOverlay(function (kv) {
+                        if (active) kv.press(code);
+                        else kv.release(code);
+                    });
+                });
+            });
+
+            document.getElementById('release').addEventListener('click', function () {
+                document.querySelectorAll('[data-press]').forEach(function (b) {
+                    b.classList.remove('on');
+                });
+                withOverlay(function (kv) {
+                    kv.releaseAll();
+                });
+            });
+
+            document.getElementById('reset').addEventListener('click', function () {
+                withOverlay(function (kv) {
+                    kv.applySettings({});
+                });
+            });
+
+            document.querySelectorAll('[data-size]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    var parts = button.getAttribute('data-size').split('x');
+                    setSize(parseInt(parts[0], 10), parseInt(parts[1], 10));
+                });
+            });
+
+            document.querySelectorAll('[data-scene]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    var scene = button.getAttribute('data-scene');
+                    if (scene === 'multi') {
+                        setSize(240, 600);
+                        withOverlay(function (kv) {
+                            kv.applySettings({
+                                keyCount: 6,
+                                keyList:
+                                    'KeyZ\nKeyX\nKeyC\nKeyV\nControlLeft\nNumpad4',
+                                labelMode: 'code',
+                                squareSize: 46,
+                                squareGap: 6
+                            });
+                            kv.releaseAll();
+                            kv.press('KeyZ');
+                            kv.press('KeyX');
+                            kv.press('ControlLeft');
+                        });
+                    } else if (scene === 'big') {
+                        setSize(300, 520);
+                        withOverlay(function (kv) {
+                            kv.applySettings({
+                                keyCount: 4,
+                                keyList: 'KeyZ\nKeyX\nKeyC\nKeyV',
+                                labelMode: 'char',
+                                squareSize: 64,
+                                borderWidth: 3,
+                                borderRadius: 14,
+                                rainMode: 'bar',
+                                rainFlowSpeed: 420,
+                                rainBlockHeight: 20,
+                                rainBlockWidth: 80,
+                                rainRoundness: 45,
+                                rainFadePosition: 55
+                            });
+                            kv.releaseAll();
+                            kv.press('KeyZ');
+                            kv.press('KeyV');
+                        });
+                    } else if (scene === 'blocks') {
+                        setSize(200, 500);
+                        withOverlay(function (kv) {
+                            kv.applySettings({
+                                keyCount: 4,
+                                keyList: 'KeyZ\nKeyX\nKeyC\nKeyV',
+                                labelMode: 'char',
+                                squareSize: 44,
+                                squareGap: 8,
+                                rainMode: 'blocks',
+                                rainFlowSpeed: 330,
+                                rainBlockHeight: 22,
+                                rainBlockWidth: 85,
+                                rainBarGap: 16,
+                                rainRoundness: 50,
+                                rainFadePosition: 45
+                            });
+                            kv.releaseAll();
+                            kv.press('KeyZ');
+                            kv.press('KeyX');
+                            kv.press('KeyC');
+                        });
+                    }
+                });
+            });
+
+            /* ---- resizing ---- */
+            function drag(handle, apply) {
+                handle.addEventListener('mousedown', function (event) {
+                    event.preventDefault();
+                    var startX = event.clientX;
+                    var startY = event.clientY;
+                    var startW = stage.offsetWidth;
+                    var startH = stage.offsetHeight;
+
+                    function move(moveEvent) {
+                        apply(
+                            startW + (moveEvent.clientX - startX),
+                            startH + (moveEvent.clientY - startY)
+                        );
+                    }
+
+                    function up() {
+                        document.removeEventListener('mousemove', move);
+                        document.removeEventListener('mouseup', up);
+                    }
+
+                    document.addEventListener('mousemove', move);
+                    document.addEventListener('mouseup', up);
+                });
+            }
+
+            function setSize(w, h) {
+                w = Math.max(32, Math.round(w));
+                h = Math.max(64, Math.round(h));
+                stage.style.width = w + 'px';
+                stage.style.height = h + 'px';
+                wInput.value = w;
+                hInput.value = h;
+            }
+
+            drag(document.getElementById('grip'), function (w, h) {
+                setSize(w, h);
+            });
+            drag(document.getElementById('grip2'), function (w, h) {
+                setSize(w, stage.offsetHeight);
+            });
+            drag(document.getElementById('grip3'), function (w, h) {
+                setSize(stage.offsetWidth, h);
+            });
+
+            /* ---- fake tosu game data (tools/serve.js) ---- */
+            var gameState = { k1: false, k2: false, m1: false, m2: false };
+
+            function pushGameKeys() {
+                fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(gameState)
+                }).catch(function () {});
+            }
+
+            document.querySelectorAll('[data-game]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    var slot = button.getAttribute('data-game');
+                    gameState[slot] = button.classList.toggle('on');
+                    pushGameKeys();
+                });
+            });
+
+            document.getElementById('gamestop').addEventListener('click', function () {
+                Object.keys(gameState).forEach(function (slot) {
+                    gameState[slot] = false;
+                });
+                document.querySelectorAll('[data-game]').forEach(function (b) {
+                    b.classList.remove('on');
+                });
+                pushGameKeys();
+            });
+
+            var autoTimer = null;
+            document.getElementById('auto2').addEventListener('click', function () {
+                var button = this;
+                var on = button.classList.toggle('on');
+                if (autoTimer) {
+                    clearInterval(autoTimer);
+                    autoTimer = null;
+                }
+                if (!on) {
+                    document.getElementById('gamestop').click();
+                    return;
+                }
+                var tick = 0;
+                autoTimer = setInterval(function () {
+                    tick++;
+                    gameState.k1 = tick % 2 === 1;
+                    gameState.k2 = tick % 3 === 0;
+                    gameState.m1 = tick % 5 === 0;
+                    pushGameKeys();
+                }, 220);
+            });
+
+            document.querySelectorAll('[data-mode]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    withOverlay(function (kv) {
+                        kv.applySettings({ inputMode: button.getAttribute('data-mode') });
+                    });
+                });
+            });
+
+            document.querySelectorAll('[data-list]').forEach(function (button) {
+                button.addEventListener('click', function () {
+                    withOverlay(function (kv) {
+                        kv.applySettings({
+                            keyList: button.getAttribute('data-list'),
+                            keyCount: 4,
+                            showInputStatus: false,
+                            gameSlots: 'k1\nk2\nm1\nm2'
+                        });
+                    });
+                });
+            });
+
+            /* ---- screenshot / automation hooks (headless testing) ---- */
+            window.__preview = {
+                setSize: function (w, h) {
+                    setSize(w, h);
+                },
+                apply: function (obj) {
+                    withOverlay(function (kv) {
+                        kv.applySettings(obj);
+                    });
+                },
+                releaseAll: function () {
+                    withOverlay(function (kv) {
+                        kv.releaseAll();
+                    });
+                },
+                press: function (code) {
+                    withOverlay(function (kv) {
+                        kv.press(code);
+                    });
+                },
+                ready: function () {
+                    return Boolean(overlayFrame && overlayFrame.keyviewer);
+                },
+                state: function () {
+                    return overlayFrame && overlayFrame.keyviewer
+                        ? overlayFrame.keyviewer.state()
+                        : null;
+                }
+            };
+
+            /* ---- state readout ---- */
+            setInterval(function () {
+                if (!overlayFrame || !overlayFrame.keyviewer) {
+                    stateEl.textContent = 'waiting for overlay…';
+                    return;
+                }
+                var s = overlayFrame.keyviewer.state();
+                var src = overlayFrame.keyviewer.source();
+                stateEl.textContent =
+                    'box=' +
+                    stage.offsetWidth +
+                    'x' +
+                    stage.offsetHeight +
+                    '  square=' +
+                    s.layout.square.toFixed(1) +
+                    '  rainArea=' +
+                    s.layout.rainHeight.toFixed(0) +
+                    '  fadeY=' +
+                    s.layout.fadeY.toFixed(1) +
+                    '  drops=' +
+                    s.rain +
+                    '  input=' + s.activeSource +
+                    ' (kbd=' + (s.keyboardSeen ? 'yes' : 'no') +
+                    ' ws=' + (s.socketOpen ? 'open' : 'closed') +
+                    ' game=' + ['k1','k2','m1','m2'].filter(function (k) { return src.gamePressed[k]; }).join(',') + ')' +
+                    '\nkeys=' +
+                    s.keys
+                        .map(function (k) {
+                            return (
+                                k.code +
+                                (k.gameSlot ? '/' + k.gameSlot : '') +
+                                '(' +
+                                k.label +
+                                ')' +
+                                (k.pressed ? ' [DOWN]' : '')
+                            );
+                        })
+                        .join('  ');
+            }, 150);
+
+            loadOverlay();
+
+            /* ?config=<json> applies overlay settings and a size, used by headless
+               screenshot tests. ?resizeAfter=<ms>:<w>x<h> resizes the stage later,
+               which exercises the "resize while key rain is running" requirement. */
+            (function applyUrlConfig() {
+                var params = new URLSearchParams(location.search);
+                var size = params.get('size');
+
+                function whenReady(callback, tries) {
+                    if (!overlayFrame || !overlayFrame.keyviewer) {
+                        if ((tries || 0) > 200) return;
+                        setTimeout(function () {
+                            whenReady(callback, (tries || 0) + 1);
+                        }, 50);
+                        return;
+                    }
+                    callback();
+                }
+
+                whenReady(function () {
+                    if (size) {
+                        var parts = size.split('x');
+                        setSize(parseInt(parts[0], 10), parseInt(parts[1], 10));
+                    }
+
+                    var resizeAfter = params.get('resizeAfter');
+                    if (resizeAfter) {
+                        var chunks = resizeAfter.split(':');
+                        setTimeout(function () {
+                            var target = chunks[1].split('x');
+                            setSize(parseInt(target[0], 10), parseInt(target[1], 10));
+                        }, parseInt(chunks[0], 10) || 500);
+                    }
+
+                    /* ?keys=<ms>:<codes> dispatches real KeyboardEvents into the
+                       overlay, then releases them after ?release=<ms>. This checks
+                       the actual keydown/keyup wiring, not just the test hook. */
+                    var keysAt = params.get('keys');
+                    if (keysAt) {
+                        var parts = keysAt.split(':');
+                        var codes = parts[1].split(',');
+
+                        function keyEvent(type, code) {
+                            var frame = stage.querySelector('iframe');
+                            if (!frame) return;
+                            frame.contentWindow.dispatchEvent(
+                                new frame.contentWindow.KeyboardEvent(type, {
+                                    code: code,
+                                    key: code,
+                                    bubbles: true
+                                })
+                            );
+                        }
+
+                        setTimeout(function () {
+                            codes.forEach(function (code) {
+                                keyEvent('keydown', code);
+                            });
+                        }, parseInt(parts[0], 10) || 500);
+
+                        var releaseAt = params.get('release');
+                        if (releaseAt) {
+                            setTimeout(function () {
+                                codes.forEach(function (code) {
+                                    keyEvent('keyup', code);
+                                });
+                            }, parseInt(releaseAt, 10));
+                        }
+                    }
+                });
+            })();
+        </script>
+    </body>
+</html>

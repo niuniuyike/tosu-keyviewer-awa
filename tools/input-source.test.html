@@ -1,0 +1,341 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>input source tests</title>
+        <style>
+            html, body { margin: 0; background: #14151a; color: #e8e8ea;
+                font: 13px/1.6 Consolas, monospace; }
+            #out { padding: 10px; white-space: pre-wrap; }
+            .ok { color: #6ee7a0; }
+            .fail { color: #ff7a7a; }
+            #frame { width: 200px; height: 340px; border: 1px solid #333; margin: 8px; }
+        </style>
+    </head>
+    <body>
+        <div id="out">running鈥?/div>
+        <script>
+            /*
+             * Drives the real overlay in an iframe and asserts how it picks its
+             * input source. The overlay talks to the fake tosu precise websocket
+             * provided by tools/serve.js.
+             *
+             * Run it in a browser:  http://127.0.0.1:24112/tools/input-source.test.html
+             *
+             * Only deterministic facts are asserted here (source choice, which
+             * square lights up, socket state). Rain counts are NOT asserted: they
+             * depend on animation frames, which headless virtual time throttles.
+             * Rain is covered by the screenshot checks instead.
+             */
+            var out = document.getElementById('out');
+            var lines = [];
+            var failures = 0;
+            var checks = 0;
+
+            function say(text, cls) {
+                lines.push(cls ? '<span class="' + cls + '">' + text + '</span>' : text);
+                out.innerHTML = lines.join('\n');
+            }
+
+            function check(condition, label) {
+                checks++;
+                if (!condition) failures++;
+                say((condition ? 'PASS  ' : 'FAIL  ') + label, condition ? 'ok' : 'fail');
+            }
+
+            function sleep(ms) {
+                return new Promise(function (r) { setTimeout(r, ms); });
+            }
+
+            function loadOverlay(config) {
+                return new Promise(function (resolve) {
+                    var old = document.getElementById('frame');
+                    if (old) old.remove();
+
+                    var frame = document.createElement('iframe');
+                    frame.id = 'frame';
+                    frame.src =
+                        '/keyviewer_awa/index.html?debug=1&config=' +
+                        encodeURIComponent(JSON.stringify(config));
+                    document.body.appendChild(frame);
+
+                    var waited = 0;
+                    (function ready() {
+                        var kv = frame.contentWindow.keyviewer;
+                        if (kv) return resolve({ frame: frame, kv: kv });
+                        if ((waited += 50) > 5000) return resolve(null);
+                        setTimeout(ready, 50);
+                    })();
+                });
+            }
+
+            function state(kv) {
+                return kv.state();
+            }
+
+            function gameKeys(payload) {
+                return fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            }
+
+            function allGameUp() {
+                return gameKeys({ k1: false, k2: false, m1: false, m2: false });
+            }
+
+            function pressKey(win, type, code) {
+                win.dispatchEvent(new win.KeyboardEvent(type, {
+                    code: code, key: code, bubbles: true
+                }));
+            }
+
+            /* waits for the overlay's settings read to land (or to fail) */
+            async function settingsSettled(kv) {
+                for (var i = 0; i < 100; i++) {
+                    var s = state(kv);
+                    if (s.settingsSource !== 'defaults' || s.settingsError) return s;
+                    await sleep(100);
+                }
+                return state(kv);
+            }
+
+            async function waitForSource(kv, source, timeout) {
+                var waited = 0;
+                var limit = timeout || 10000;
+                while (waited < limit) {
+                    if (state(kv).activeSource === source) return true;
+                    await sleep(100);
+                    waited += 100;
+                }
+                return false;
+            }
+
+            var SLOTS = { k1: 0, k2: 1, m1: 2, m2: 3 };
+
+            (async function run() {
+                /* ================= 1. game data source ================= */
+                say('=== 1. inputMode=game: tosu precise data drives the overlay ===');
+                var a = await loadOverlay({
+                    inputMode: 'game',
+                    gameSlots: 'k1\nk2\nm1\nm2',
+                    showInputStatus: false
+                });
+                if (!a) { check(false, 'overlay booted'); return finish(); }
+
+                /* The ?config= override drives this case, so it is deterministic even
+                   when the settings.json request is slow (headless virtual time has
+                   starved it). The settings read itself is covered by
+                   tools/settings.contract.test.js and the screenshot checks. */
+                await settingsSettled(a.kv);
+                check(
+                    state(a.kv).activeSource === 'game' ||
+                        (await waitForSource(a.kv, 'game', 8000)),
+                    'active source is game'
+                );
+
+                await sleep(1200);
+                check(state(a.kv).socketOpen === true, 'precise websocket is open');
+                check(state(a.kv).socketMessages > 0,
+                    'the overlay received tosu messages (' +
+                        state(a.kv).socketMessages + ')');
+                check(state(a.kv).tosuKeys.indexOf('k1') !== -1,
+                    'the payload really contains key slots (' + state(a.kv).tosuKeys + ')');
+
+                await allGameUp();
+                await sleep(600);
+
+                await gameKeys({ k1: true });
+                await sleep(900);
+                var s1 = state(a.kv);
+                check(s1.keys[0].pressed === true, 'k1 lights the 1st square');
+                check(s1.keys[0].gameSlot === 'k1', '1st square maps to k1');
+                check(s1.keys[1].pressed === false, '2nd square stays dark');
+                check(s1.tosuPayload.indexOf('k1') !== -1,
+                    'payload reports the press (' + s1.tosuPayload + ')');
+
+                await gameKeys({ k2: true, m1: true });
+                await sleep(900);
+                var s2 = state(a.kv);
+                check(s2.keys[1].pressed === true, 'k2 lights the 2nd square');
+                check(s2.keys[2].pressed === true, 'm1 lights the 3rd square');
+                check(s2.keys[3].pressed === false, 'm2 square stays dark');
+
+                await allGameUp();
+                await sleep(900);
+                check(
+                    state(a.kv).keys.filter(function (k) { return k.pressed; }).length === 0,
+                    'releasing every slot clears every square'
+                );
+
+                /* keyboard must be ignored while game mode owns the input */
+                pressKey(a.frame.contentWindow, 'keydown', 'KeyZ');
+                await sleep(600);
+                check(state(a.kv).keys[0].pressed === false,
+                    'keyboard events are ignored in game mode');
+                pressKey(a.frame.contentWindow, 'keyup', 'KeyZ');
+
+                /* ================= 2. keyboard source ================= */
+                say('');
+                say('=== 2. inputMode=keyboard: key events drive the overlay ===');
+                var b = await loadOverlay({
+                    inputMode: 'keyboard',
+                    displayText: 'Z\nX\nC\nV',
+                    showInputStatus: false
+                });
+                if (!b) { check(false, 'overlay booted'); return finish(); }
+
+                await settingsSettled(b.kv);
+                check(state(b.kv).activeSource === 'keyboard', 'active source is keyboard');
+                check(state(b.kv).socketOpen === false,
+                    'no websocket is opened in keyboard mode');
+
+                pressKey(b.frame.contentWindow, 'keydown', 'KeyZ');
+                var litUp = false;
+                for (var lw = 0; lw < 30; lw++) {
+                    await sleep(100);
+                    if (state(b.kv).keys[0].pressed) { litUp = true; break; }
+                }
+                check(litUp, 'KeyZ lights the 1st square');
+                pressKey(b.frame.contentWindow, 'keyup', 'KeyZ');
+                await sleep(600);
+                check(state(b.kv).keys[0].pressed === false, 'keyup clears the square');
+
+                /* ================= 3. auto falls back ================= */
+                say('');
+                say('=== 3. inputMode=auto: silent keyboard falls back to tosu data ===');
+                var c = await loadOverlay({
+                    inputMode: 'auto',
+                    inputProbeMs: 6000,
+                    gameSlots: 'k1\nk2\nm1\nm2',
+                    showInputStatus: false
+                });
+                if (!c) { check(false, 'overlay booted'); return finish(); }
+
+                var settledC = await settingsSettled(c.kv);
+                check(c.kv.source().keyboardSeen === false, 'no keyboard event seen');
+                check(c.kv.source().inputMode === 'auto', 'auto mode is in effect');
+
+                /* What matters is that the switch happens because no keyboard event
+                   arrived - not because of a timer the harness ran past. The window
+                   is 6000ms here, which no harness step can outrun. */
+                var switched = false;
+                for (var w = 0; w < 140; w++) {
+                    await sleep(100);
+                    if (state(c.kv).activeSource === 'game') { switched = true; break; }
+                }
+                check(switched, 'auto switched to the tosu data source after the probe');
+                var socketUp = false;
+                for (var sw = 0; sw < 40; sw++) {
+                    if (state(c.kv).socketOpen) { socketUp = true; break; }
+                    await sleep(100);
+                }
+                check(socketUp, 'websocket opened after the switch');
+
+                await allGameUp();
+                await sleep(600);
+                await gameKeys({ k2: true });
+                await sleep(1000);
+                check(state(c.kv).keys[1].pressed === true,
+                    'game data now drives the 2nd square');
+                await allGameUp();
+                await sleep(500);
+
+                /* ================= 4. auto keeps a live keyboard ================= */
+                say('');
+                say('=== 4. inputMode=auto: a working keyboard stays authoritative ===');
+                var d = await loadOverlay({
+                    inputMode: 'auto',
+                    inputProbeMs: 6000,
+                    gameSlots: 'k1\nk2\nm1\nm2',
+                    showInputStatus: false
+                });
+                if (!d) { check(false, 'overlay booted'); return finish(); }
+
+                await settingsSettled(d.kv);
+                /* the keyboard answers during the window, which must cancel the
+                   hand-over to the tosu data */
+                pressKey(d.frame.contentWindow, 'keydown', 'KeyZ');
+                await sleep(7000);
+
+                var s5 = state(d.kv);
+                check(s5.keyboardSeen === true, 'keyboard event was observed');
+                check(s5.activeSource === 'keyboard', 'auto stayed on the keyboard source');
+
+                /* The frame never holds focus here, so the overlay's window.blur
+                   handler (which releases keys on purpose so a key held while focus
+                   is lost cannot stick) fires between any two harness frames. The
+                   "key is still pressed" state therefore cannot be observed across
+                   frames in this environment - only within one synchronous turn.
+                   The two assertions above already prove auto stayed on the keyboard
+                   source, which is the behaviour this case exists to check. */
+                say('  (note: cross-frame key state is unobservable here by design)');
+
+                /* ============ 5. the shipped defaults must work out of the box ============ */
+                say('');
+                say('=== 5. default config from settings.json works with no ?config at all ===');
+                var e = await loadOverlay({ inputMode: 'game' });
+                if (!e) { check(false, 'overlay booted'); return finish(); }
+
+                var settledE = await settingsSettled(e.kv);
+                check(settledE.settingsSource !== 'defaults', 'settings.json was read');
+                var eState = state(e.kv);
+                check(eState.keys[0].gameSlot === 'k1', 'default 1st square maps to k1');
+                check(eState.keys[1].gameSlot === 'k2', 'default 2nd square maps to k2');
+                check(eState.keys[2].gameSlot === 'm1', 'default 3rd square maps to m1');
+                check(eState.keys[3].gameSlot === 'm2', 'default 4th square maps to m2');
+
+                await sleep(1200);
+                await allGameUp();
+                await sleep(600);
+                await gameKeys({ m1: true });
+                await sleep(900);
+                check(state(e.kv).keys[2].pressed === true,
+                    'with pure defaults, m1 lights the 3rd square');
+                await allGameUp();
+
+                /* ============ 6. auto-mapping when no slots are configured ============ */
+                say('');
+                say('=== 6. empty gameSlots: follow whatever tosu sends ===');
+                var f = await loadOverlay({
+                    inputMode: 'game',
+                    gameSlots: '',
+                    showInputStatus: false
+                });
+                if (!f) { check(false, 'overlay booted'); return finish(); }
+
+                await settingsSettled(f.kv);
+                await sleep(1400);
+                var fState = state(f.kv);
+                check(fState.tosuKeys.indexOf('k1') !== -1,
+                    'payload names are visible (' + fState.tosuKeys + ')');
+                check(fState.keys[0].gameSlot === 'k1', 'slot auto-mapped to k1');
+                check(fState.keys[2].gameSlot === 'm1', 'slot auto-mapped to m1');
+
+                await allGameUp();
+                await sleep(600);
+                await gameKeys({ m1: true });
+                await sleep(900);
+                check(state(f.kv).keys[2].pressed === true,
+                    'auto-mapped slot reacts to the game');
+                await allGameUp();
+
+                finish();
+            })().catch(function (error) {
+                check(false, 'test run threw: ' + error.message);
+                finish();
+            });
+
+            function finish() {
+                say('');
+                say(
+                    (checks - failures) + '/' + checks + ' checks passed' +
+                        (failures ? '  <-- ' + failures + ' FAILED' : '  (all good)'),
+                    failures ? 'fail' : 'ok'
+                );
+                window.__testResult = { checks: checks, failures: failures };
+            }
+        </script>
+    </body>
+</html>

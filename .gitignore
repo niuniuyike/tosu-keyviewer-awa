@@ -1,0 +1,18 @@
+# build output - the .bat files carry these embedded; the zips are release assets
+*.zip
+mma-card-fix/
+
+# scratch and research
+_research/
+_probe.log
+_c.js
+_g.js
+_guard.js
+
+# the fake-tosu server writes probe output here
+tools/out/
+tools/*.log
+
+# never publish a real tosu config
+tosu.env
+*.values.json

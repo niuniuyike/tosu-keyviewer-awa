@@ -1,0 +1,318 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>keyviewer + ManiaMapAnalyser compatibility test</title>
+        <style>
+            html, body { margin: 0; background: #14151a; color: #e8e8ea;
+                font: 13px/1.6 Consolas, monospace; }
+            #out { padding: 10px; white-space: pre-wrap; }
+            .ok { color: #6ee7a0; }
+            .fail { color: #ff7a7a; }
+            .info { color: #9fd0ff; }
+            #frames { display: flex; gap: 8px; padding: 10px; }
+            iframe { border: 1px solid #333; background: #000; }
+        </style>
+    </head>
+    <body>
+        <div id="out">running…</div>
+        <div id="frames"></div>
+        <script>
+            /*
+             * Acceptance test for the compatibility goal: the REAL
+             * ManiaMapAnalyser still hides during play and shows outside it while
+             * the key viewer runs next to it.
+             *
+             * The analyser is served through /__analyser/, which patches its
+             * config.js so it talks to THIS fake tosu instead of localhost:24050.
+             * Nothing about the analyser's own code changes.
+             *
+             *   node tools/serve.js 24190 "<tosu static folder>"
+             */
+            var ANALYSER_PATH = '/__analyser/';
+            var STATIC_ROOT = '/__static/';
+
+            var out = document.getElementById('out');
+            var lines = [];
+            var failures = 0;
+            var checks = 0;
+
+            function say(text, cls) {
+                lines.push(text === '' ? '' : (cls ? '<span class="' + cls + '">' + text + '</span>' : text));
+                out.innerHTML = lines.join('\n');
+            }
+
+            function check(condition, label, detail) {
+                checks++;
+                if (!condition) failures++;
+                say((condition ? 'PASS  ' : 'FAIL  ') + label + (detail ? '   [' + detail + ']' : ''),
+                    condition ? 'ok' : 'fail');
+            }
+
+            function sleep(ms) {
+                return new Promise(function (r) { setTimeout(r, ms); });
+            }
+
+            function setState(name, number) {
+                return fetch('/__fake/state', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, number: number })
+                }).then(function (r) { return r.json(); });
+            }
+
+            function setDashboard(payload) {
+                return fetch('/__fake/dashboard', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(function (r) { return r.json(); });
+            }
+
+            function mount(id, src, width, height) {
+                var frame = document.createElement('iframe');
+                frame.id = id;
+                frame.style.cssText = 'width:' + width + 'px;height:' + height + 'px';
+                frame.src = src;
+                document.getElementById('frames').appendChild(frame);
+                return frame;
+            }
+
+            function analyserDoc() {
+                var frame = document.getElementById('analyser');
+                if (!frame || !frame.contentDocument) return null;
+                return frame.contentDocument;
+            }
+
+            function analyserCard() {
+                var doc = analyserDoc();
+                return doc ? doc.querySelector('.main-card') : null;
+            }
+
+            function cardHidden() {
+                var card = analyserCard();
+                if (!card) return null;
+                if (card.classList.contains('card-hidden-by-play')) return true;
+                return card.getAttribute('aria-hidden') === 'true';
+            }
+
+            function cardOpacity() {
+                var card = analyserCard();
+                var frame = document.getElementById('analyser');
+                if (!card || !frame) return null;
+                return frame.contentWindow.getComputedStyle(card).opacity;
+            }
+
+            /* The hidden state is a 280ms CSS transition, and headless browsers
+               throttle those, so polling the animated opacity is unreliable.
+               Read the value the class resolves to straight out of the stylesheet
+               instead: that is what the card settles on in a real browser. */
+            var hiddenOpacityRule = null;
+            async function loadHiddenOpacityRule() {
+                if (hiddenOpacityRule !== null) return hiddenOpacityRule;
+                var sheets = ['base.css', 'main.css', 'overlay.css', 'animations.css'];
+                for (var i = 0; i < sheets.length; i++) {
+                    try {
+                        var response = await fetch('/__analyser/styles/' + sheets[i]);
+                        if (!response.ok) continue;
+                        var css = await response.text();
+                        var match = css.match(
+                            /\.main-card\.card-hidden-by-play\s*\{([^}]*)\}/
+                        );
+                        if (!match) continue;
+                        var opacity = match[1].match(/opacity\s*:\s*([0-9.]+)/);
+                        if (opacity) {
+                            hiddenOpacityRule = parseFloat(opacity[1]);
+                            return hiddenOpacityRule;
+                        }
+                    } catch (error) {
+                        /* try the next sheet */
+                    }
+                }
+                hiddenOpacityRule = null;
+                return null;
+            }
+
+            function analyserStatus() {
+                var doc = analyserDoc();
+                var el = doc ? doc.getElementById('status') : null;
+                return el ? el.textContent : '(no status element)';
+            }
+
+            async function waitFor(predicate, ms, step) {
+                var waited = 0;
+                step = step || 100;
+                while (waited < ms) {
+                    if (predicate()) return true;
+                    await sleep(step);
+                    waited += step;
+                }
+                return predicate();
+            }
+
+            (async function run() {
+                say('=== boot both plugins against the fake tosu ===');
+
+                await fetch('/__fake/reset', { method: 'POST' });
+                await setDashboard({ squareSize: 56, displayText: 'Z\nX\nC\nV', showDuringPlay: false });
+                await setState('menu', 0);
+
+                mount('keyviewer', '/keyviewer_awa/?diag=1', 200, 420);
+                mount('analyser', ANALYSER_PATH, 540, 640);
+
+                var kv = null;
+                await waitFor(function () {
+                    kv = document.getElementById('keyviewer').contentWindow.keyviewer;
+                    return Boolean(kv);
+                }, 15000);
+                check(Boolean(kv), 'key viewer booted');
+
+                var cardReady = await waitFor(function () { return Boolean(analyserCard()); }, 25000);
+                check(cardReady, 'the real analyser rendered its card');
+                if (!cardReady) {
+                    say('  analyser status: ' + analyserStatus(), 'fail');
+                    return finish();
+                }
+                say('  analyser status: ' + analyserStatus());
+
+                /* the analyser keeps its runtime state in a module-scope object; read
+                   the two fields its visibility logic depends on */
+                function analyserState() {
+                    var frame = document.getElementById('analyser');
+                    var out = { reachable: false };
+                    try {
+                        var doc = frame.contentDocument;
+                        var card = doc.querySelector('.main-card');
+                        out.reachable = true;
+                        out.cardClass = card ? card.getAttribute('class') : null;
+                        out.aria = card ? card.getAttribute('aria-hidden') : null;
+                        out.opacity = frame.contentWindow.getComputedStyle(card).opacity;
+                        out.status = analyserStatus();
+                    } catch (error) {
+                        out.error = String(error);
+                    }
+                    return out;
+                }
+
+                function report(label) {
+                    var s = analyserState();
+                    say('  [' + label + '] class=' + JSON.stringify(s.cardClass) +
+                        ' aria=' + s.aria + ' opacity=' + s.opacity);
+                }
+
+                /* ---------- 1. outside play -> visible ---------- */
+                say('');
+                say('=== 1. outside a map the analyser card is visible ===');
+                await setState('selectPlay', 5);
+                var visibleOutside = await waitFor(function () { return cardHidden() === false; }, 15000);
+                check(visibleOutside, 'card NOT hidden in song select',
+                    'hidden=' + cardHidden() + ' opacity=' + cardOpacity());
+
+                /* ---------- 2. during play -> hidden ---------- */
+                say('');
+                say('=== 2. during a map the analyser card hides ===');
+                report('before play');
+                await setState('play', 2);
+                await sleep(3000);
+                report('after play');
+                var hiddenInPlay = await waitFor(function () { return cardHidden() === true; }, 15000);
+                check(hiddenInPlay, 'card IS hidden while playing',
+                    'hidden=' + cardHidden() + ' opacity=' + cardOpacity());
+
+                var fadeTarget = await loadHiddenOpacityRule();
+                check(fadeTarget === 0,
+                    'the hidden class resolves to opacity 0 (fully faded)',
+                    String(fadeTarget));
+
+                /* ---------- 3. key viewer unaffected ---------- */
+                say('');
+                say('=== 3. the key viewer keeps working during that map ===');
+                await fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ k1: true })
+                });
+                var lit = await waitFor(function () { return kv.state().keys[0].pressed; }, 5000);
+                check(lit, 'key viewer lights its first square');
+                await fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ k1: false, k2: false, m1: false, m2: false })
+                });
+
+                /* ---------- 4. leaving play -> visible again ---------- */
+                say('');
+                say('=== 4. leaving the map shows the card again ===');
+                await setState('resultScreen', 7);
+                var shownAfter = await waitFor(function () { return cardHidden() === false; }, 15000);
+                check(shownAfter, 'card visible again on the result screen',
+                    'hidden=' + cardHidden() + ' opacity=' + cardOpacity());
+
+                await setState('menu', 0);
+                /* the analyser deliberately ALWAYS hides its card on the main menu
+                   (`state.clientStateName === "menu"` short-circuit in hud.js), so
+                   "visible in the main menu" is not the expected behaviour. What
+                   matters is that the class is driven by the state at all. */
+                var menuHidden = await waitFor(function () { return cardHidden() === true; }, 20000);
+                check(menuHidden, 'card hidden on the main menu (analyser hides it there by design)',
+                    'hidden=' + cardHidden());
+
+                /* back to song select: OutsidePlay means visible again */
+                await setState('selectPlay', 5);
+                var selectVisible = await waitFor(function () { return cardHidden() === false; }, 20000);
+                check(selectVisible, 'card visible again in song select',
+                    'hidden=' + cardHidden() + ' opacity=' + cardOpacity());
+
+                /* ---------- 5. the key viewer's own hide does not disturb it ---------- */
+                say('');
+                say('=== 5. the key viewer hiding itself leaves the analyser alone ===');
+                await setDashboard({ showDuringPlay: true });
+                await setState('selectPlay', 5);
+
+                var kvHidden = await waitFor(function () { return kv.visibility().hidden; }, 15000);
+                check(kvHidden, 'key viewer hid itself outside play');
+                check(cardHidden() === false, 'analyser card still visible in song select',
+                    'hidden=' + cardHidden());
+
+                await setState('play', 2);
+                var kvShown = await waitFor(function () { return kv.visibility().hidden === false; }, 15000);
+                check(kvShown, 'key viewer showed itself again during play');
+                var analyserStillHides = await waitFor(function () { return cardHidden() === true; }, 15000);
+                check(analyserStillHides, 'analyser card still hides during play',
+                    'hidden=' + cardHidden());
+
+                /* ---------- 6. socket / traffic health ---------- */
+                say('');
+                say('=== 6. the two plugins do not fight over the server ===');
+                var info = await (await fetch('/__fake/state')).json();
+                say('  data endpoints: ' + JSON.stringify(info.dataPaths) +
+                    '   commands clients: ' + info.commandClients);
+                check(info.commandClients >= 2,
+                    'both plugins hold a settings channel',
+                    String(info.commandClients));
+                check(info.settingsReads <= 8,
+                    'no settings polling storm',
+                    String(info.settingsReads) + ' reads');
+
+                var before6 = info.settingsReads;
+                await sleep(6000);
+                var after6 = (await (await fetch('/__fake/state')).json()).settingsReads;
+                check(after6 === before6, 'six idle seconds caused zero settings reads',
+                    before6 + ' -> ' + after6);
+
+                finish();
+            })().catch(function (error) {
+                check(false, 'test threw: ' + error.message);
+                finish();
+            });
+
+            function finish() {
+                say('');
+                say((checks - failures) + '/' + checks + ' checks passed' +
+                    (failures ? '  <-- ' + failures + ' FAILED' : '  (all good)'),
+                    failures ? 'fail' : 'ok');
+                window.__result = { checks: checks, failures: failures };
+            }
+        </script>
+    </body>
+</html>

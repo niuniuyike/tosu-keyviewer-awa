@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>rain probe</title>
+        <style>
+            body { margin: 0; background: #101116; color: #9fe8b0;
+                font: 12px/1.5 Consolas, monospace; }
+            #out { white-space: pre-wrap; padding: 8px; }
+            #stage { width: 160px; height: 480px; margin: 8px; outline: 1px solid #333; }
+            iframe { width: 100%; height: 100%; border: 0; display: block; background: transparent; }
+        </style>
+    </head>
+    <body>
+        <div id="out">booting…</div>
+        <div id="stage"></div>
+        <script>
+            var out = document.getElementById('out');
+            var stage = document.getElementById('stage');
+            var config = {
+                inputMode: 'keyboard',
+                keyCount: 2,
+                keyList: 'KeyZ\nKeyX',
+                showInputStatus: false,
+                squareSize: 36,
+                squareGap: 8,
+                rainMode: 'bar',
+                rainFlowSpeed: 400,
+                rainBarLength: 400,
+                rainFadePosition: 30,
+                debugStatus: true
+            };
+
+
+            var frame = document.createElement('iframe');
+            stage.appendChild(frame);
+            /* build the URL exactly the way config-probe.html does - that form is
+               verified to reach the overlay */
+            frame.src =
+                '/keyviewer_awa/index.html?debug=1&config=' +
+                encodeURIComponent(JSON.stringify(config));
+
+
+            var lines = [];
+            function log(text) {
+                lines.push(text);
+                out.textContent = lines.join('\n');
+            }
+
+            /* surface any error thrown inside the overlay while it runs */
+            window.addEventListener('error', function (event) {
+                log('WINDOW ERROR: ' + event.message + ' @ ' + event.filename + ':' + event.lineno);
+            });
+
+            var kv = null;
+            var t0 = Date.now();
+            var samples = [];
+
+            (function wait() {
+                kv = frame.contentWindow.keyviewer;
+                if (!kv) return setTimeout(wait, 50);
+                try {
+                    frame.contentWindow.addEventListener('error', function (event) {
+                        log('OVERLAY ERROR: ' + event.message + ' @ line ' + event.lineno);
+                    });
+                } catch (error) {
+                    log('could not attach overlay error listener: ' + error.message);
+                }
+                log('hook found at ' + (Date.now() - t0) + 'ms');
+                log('overlay search: ' + frame.contentWindow.location.search.slice(0, 40) + '…');
+
+                var traceCount = 0;
+                frame.contentWindow.__rainTrace = function (message) {
+                    if (traceCount++ < 200) log('TRACE ' + message);
+                };
+
+                /* keep re-applying the config: the overlay re-reads settings.json
+                   shortly after boot, and applySettings is signature based */
+                kv.applySettings(config);
+                var applied = 0;
+                var reapply = setInterval(function () {
+                    kv.applySettings(config);
+                    if (++applied >= 12) clearInterval(reapply);
+                }, 100);
+
+                /* is the animation loop actually running? */
+                var canvas = frame.contentWindow.document.getElementById('rain_canvas');
+                log('canvas=' + (canvas ? canvas.width + 'x' + canvas.height : 'missing') +
+                    ' ctx=' + (canvas && canvas.getContext ? (canvas.getContext('2d') ? 'ok' : 'null') : '?'));
+
+                setTimeout(function () {
+                    kv.press('KeyZ');
+                    var st = kv.state();
+                    log(
+                        'after press: inputMode=' + st.settings.inputMode +
+                            ' mode=' + st.settings.rainMode +
+                            ' activeSource=' + st.activeSource +
+                            ' keys=' + st.settings.keyCount +
+                            ' list=' + JSON.stringify(st.settings.keyList) +
+                            ' rainMode=' + st.settings.rainMode
+                    );
+                    log(
+                        'squares: ' + st.keys
+                            .map(function (k) {
+                                return (k.code || '?') + (k.pressed ? '[DOWN]' : '');
+                            })
+                            .join(' ')
+                    );
+                    log('debugRain: ' + JSON.stringify(kv.debugRain()));
+                    log('typeof step=' + typeof kv.step + ' rainState=' + typeof kv.rainState);
+                    try {
+                        log('one step -> ' + kv.step(0.25));
+                        log('after step: ' + JSON.stringify(kv.debugRain()));
+                    } catch (error) {
+                        log('step threw: ' + error.message);
+                    }
+
+                    /* step the rain deterministically instead of waiting on
+                       requestAnimationFrame, which headless throttles */
+                    function show(label) {
+                        var pieces = kv.rainState();
+                        log(
+                            label +
+                                ' pieces=' +
+                                pieces.length +
+                                ' ' +
+                                pieces
+                                    .map(function (p) {
+                                        return (
+                                            'k' + p.key +
+                                            ' bottom=' + p.yBottom.toFixed(1) +
+                                            ' height=' + p.height.toFixed(1) +
+                                            (p.growing ? ' GROWING' : ' drifting') +
+                                            ' fade=' + p.fade.toFixed(2)
+                                        );
+                                    })
+                                    .join(' | ')
+                        );
+                    }
+
+                    show('t=0');
+                    for (var t = 0; t < 6; t++) {
+                        kv.step(0.25);
+                        show('t=+' + (t + 1) * 250 + 'ms');
+                    }
+
+                    kv.releaseAll();
+                    show('released');
+                    for (var r = 0; r < 6; r++) {
+                        kv.step(0.25);
+                        show('after release +' + (r + 1) * 250 + 'ms');
+                    }
+                }, 1200);
+            })();
+        </script>
+    </body>
+</html>

@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>state stream probe</title>
+        <style>
+            html, body { margin: 0; background: #14151a; color: #e8e8ea;
+                font: 13px/1.7 Consolas, monospace; }
+            #out { padding: 12px; white-space: pre-wrap; }
+            .ok { color: #6ee7a0; }
+            .bad { color: #ff7a7a; }
+            .dim { color: #8b8d98; }
+        </style>
+    </head>
+    <body>
+        <div id="out">connecting…</div>
+        <script>
+            /*
+             * Read-only diagnostic for the analyser hide/show problem.
+             *
+             * Opens a socket on BOTH endpoints the two plugins use and shows what
+             * tosu is really pushing:
+             *   /websocket/v2          <- the analyser reads state.name from here
+             *   /websocket/v2/precise  <- the key viewer reads its keys from here
+             *
+             * Start a map and watch state.name. If it never becomes "play" while
+             * the map is running, the problem is upstream of the analyser and no
+             * amount of plugin code can fix the hiding.
+             */
+            var TOSU_PORT = parseInt(location.port, 10) === 24050
+                ? 24050
+                : parseInt(new URLSearchParams(location.search).get('tosu') || '24050', 10);
+
+            var out = document.getElementById('out');
+            var lines = [];
+            var START = Date.now();
+
+            function say(text, cls) {
+                lines.push(text === '' ? '' : (cls ? '<span class="' + cls + '">' + text + '</span>' : text));
+                out.innerHTML = lines.join('\n');
+            }
+
+            function age(ts) {
+                return ((Date.now() - ts) / 1000).toFixed(1) + 's';
+            }
+
+            var lastGeneral = null;
+            var lastPrecise = null;
+            var generalSeenAt = 0;
+            var preciseSeenAt = 0;
+            var generalCount = 0;
+            var preciseCount = 0;
+            var timeline = [];
+            var connectErrors = 0;
+
+            function connect(path, onMessage) {
+                var ws;
+                try {
+                    ws = new WebSocket('ws://127.0.0.1:' + TOSU_PORT + path);
+                } catch (error) {
+                    connectErrors++;
+                    return;
+                }
+                ws.onerror = function () { connectErrors++; };
+                ws.onclose = function () {
+                    setTimeout(function () { connect(path, onMessage); }, 1000);
+                };
+                ws.onmessage = function (event) {
+                    var data;
+                    try { data = JSON.parse(event.data); } catch (e) { return; }
+                    onMessage(data);
+                };
+            }
+
+            connect('/websocket/v2?l=state-probe-html', function (data) {
+                lastGeneral = data;
+                generalSeenAt = Date.now();
+                generalCount++;
+            });
+
+            connect('/websocket/v2/precise?l=state-probe-html', function (data) {
+                lastPrecise = data;
+                preciseSeenAt = Date.now();
+                preciseCount++;
+            });
+
+            /* record every change of state.name with a timestamp */
+            setInterval(function () {
+                if (!lastGeneral || !lastGeneral.state) return;
+                var name = String(lastGeneral.state.name);
+                var last = timeline.length ? timeline[timeline.length - 1].name : null;
+                if (name !== last) {
+                    timeline.push({ at: new Date().toLocaleTimeString(), name: name });
+                }
+            }, 40);
+
+            function render() {
+                lines = [];
+                say('probing tosu on 127.0.0.1:' + TOSU_PORT, 'dim');
+                say('start a map and watch state.name', 'dim');
+                say('');
+
+                var gs = lastGeneral && lastGeneral.state ? lastGeneral.state : null;
+                var name = gs ? String(gs.name) : '(nothing yet)';
+                var normalized = name.trim().toLowerCase().replace(/[^a-z]/g, '');
+                var playing = normalized === 'play' || normalized === 'gameplay';
+
+                say('=== /websocket/v2   (this is what the analyser reads) ===');
+                say('  state.name   : ' + name + (playing ? '     <== PLAY' : ''),
+                    playing ? 'ok' : '');
+                say('  state.number : ' + (gs ? gs.number : '-'));
+                say('  game.focused : ' + (lastGeneral && lastGeneral.game ? lastGeneral.game.focused : '-'));
+                say('  messages     : ' + generalCount +
+                    '   last ' + (generalSeenAt ? age(generalSeenAt) + ' ago' : 'never'));
+                say('  keys         : ' + (lastGeneral && lastGeneral.keys
+                    ? Object.keys(lastGeneral.keys).join(',') : '-'));
+                say('');
+
+                say('=== /websocket/v2/precise   (this is what the key viewer reads) ===');
+                say('  messages     : ' + preciseCount +
+                    '   last ' + (preciseSeenAt ? age(preciseSeenAt) + ' ago' : 'never'));
+                say('  carries state: ' + Boolean(lastPrecise && lastPrecise.state));
+                say('');
+
+                say('=== transitions of state.name seen here ===');
+                if (!timeline.length) {
+                    say('  (none yet)', 'dim');
+                } else {
+                    timeline.slice(-14).forEach(function (entry) {
+                        say('  ' + entry.at + '   ' + entry.name);
+                    });
+                }
+                say('');
+                say('probe uptime ' + ((Date.now() - START) / 1000).toFixed(0) + 's' +
+                    (connectErrors ? '   connect errors: ' + connectErrors : ''));
+            }
+
+            setInterval(render, 250);
+            render();
+        </script>
+    </body>
+</html>

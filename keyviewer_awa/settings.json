@@ -1,0 +1,241 @@
+[
+    {
+        "uniqueID": "HEADERINPUT",
+        "type": "header",
+        "title": "输入来源 / Input source（不亮先看这里）",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "showInputStatus",
+        "type": "checkbox",
+        "title": "显示输入来源提示 / Show input source",
+        "description": "在 Overlay 左上角显示当前使用的是「键盘输入」还是「tosu 数据」。排障时打开；OBS 里预览确认没问题后可以关掉。也可以在 URL 后面加 `?debug=1` 临时打开，那样还会多显示设置读取状态。",
+        "value": false
+    },
+    {
+        "uniqueID": "HEADERKEYBINDS",
+        "type": "header",
+        "title": "显示 / Display",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "displayText",
+        "type": "textarea",
+        "title": "显示文本 / Display text",
+        "description": "四个方块上显示什么文字，第一行 = 最左边，一行一个。默认 Z X C V。\n写成一行 `ZXCV` 也会自动按字符拆成四个。留空的行会显示它对应的数据槽名字（K1、K2、M1、M2）。\n这只改显示的文字，不影响按键的识别。",
+        "value": "Z\nX\nC\nV"
+    },
+    {
+        "uniqueID": "showDuringPlay",
+        "type": "checkbox",
+        "title": "游戏开始时显示 / Show only while playing",
+        "description": "勾上：只在真正开始游戏（游玩谱面）时才显示，选歌界面和菜单界面完全不显示。\n不勾：一直显示，选歌、菜单里也看得到。",
+        "value": false
+    },
+    {
+        "uniqueID": "gameSocket",
+        "type": "options",
+        "title": "按键数据端点 / Key data endpoint",
+        "description": "`precise`（默认）读 `/websocket/v2/precise`，就是键位一直在用的高频端点，按键最跟手。\n`general` 读 `/websocket/v2`，连接数少一条，但按键刷新率低一些。\n只有你想省一条连接时才换；换了之后「游戏开始时显示」会额外自动开一条状态连接，功能不受影响。",
+        "options": ["precise", "general"],
+        "value": "precise"
+    },
+    {
+        "uniqueID": "HEADERSQUARE",
+        "type": "header",
+        "title": "方块外观 / Square",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "squareSize",
+        "type": "number",
+        "title": "方块大小 / Square size",
+        "description": "单个正方体的边长（像素）。Overlay 变窄的时候会自动按比例缩小，保证不会被裁掉。",
+        "value": 56
+    },
+    {
+        "uniqueID": "squareScale",
+        "type": "number",
+        "title": "方块缩放 % / Square scale",
+        "description": "整体缩放百分比，100 = 使用上面的方块大小。",
+        "value": 100
+    },
+    {
+        "uniqueID": "squareGap",
+        "type": "number",
+        "title": "方块间距 / Gap",
+        "description": "正方体之间的距离（像素），和 Overlay 一样会随窗口缩放。",
+        "value": 8
+    },
+    {
+        "uniqueID": "borderWidth",
+        "type": "number",
+        "title": "边框粗细 / Border width",
+        "description": "边框宽度（像素），0 = 无边框，只显示字母。",
+        "value": 2
+    },
+    {
+        "uniqueID": "borderRadius",
+        "type": "number",
+        "title": "圆角 / Corner radius",
+        "description": "正方体圆角半径（像素），0 = 直角。",
+        "value": 8
+    },
+    {
+        "uniqueID": "letterScale",
+        "type": "number",
+        "title": "字母大小 % / Letter scale",
+        "description": "方块内字母的相对大小百分比，100 = 方块边长的 50%。",
+        "value": 100
+    },
+    {
+        "uniqueID": "HEADERCOLORS",
+        "type": "header",
+        "title": "颜色与透明度 / Colors & opacity",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "borderColor",
+        "type": "color",
+        "title": "边框颜色 / Border color",
+        "description": "正方体边框颜色。",
+        "value": "#ffffff"
+    },
+    {
+        "uniqueID": "borderOpacity",
+        "type": "number",
+        "title": "边框透明度 / Border opacity",
+        "description": "0 - 100，0 = 完全透明。",
+        "value": 100
+    },
+    {
+        "uniqueID": "letterColor",
+        "type": "color",
+        "title": "字母颜色 / Letter color",
+        "description": "方块内字母颜色。",
+        "value": "#ffffff"
+    },
+    {
+        "uniqueID": "letterOpacity",
+        "type": "number",
+        "title": "字母透明度 / Letter opacity",
+        "description": "0 - 100。",
+        "value": 100
+    },
+    {
+        "uniqueID": "pressColor",
+        "type": "color",
+        "title": "按下颜色 / Pressed color",
+        "description": "按键按下时方块亮起的颜色。",
+        "value": "#ff66aa"
+    },
+    {
+        "uniqueID": "pressOpacity",
+        "type": "number",
+        "title": "按下透明度 / Pressed opacity",
+        "description": "0 - 100，按下时填充的强度。",
+        "value": 80
+    },
+    {
+        "uniqueID": "releaseColor",
+        "type": "color",
+        "title": "松开颜色 / Released color",
+        "description": "按键松开时方块的填充颜色。",
+        "value": "#ffffff"
+    },
+    {
+        "uniqueID": "releaseOpacity",
+        "type": "number",
+        "title": "松开透明度 / Released opacity",
+        "description": "0 - 100，0 = 松开时方块完全空心。",
+        "value": 18
+    },
+    {
+        "uniqueID": "HEADERRAIN",
+        "type": "header",
+        "title": "键雨 / Key rain",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "rainColor",
+        "type": "color",
+        "title": "键雨颜色 / Rain color",
+        "description": "键雨方块的颜色。",
+        "value": "#ffd6ea"
+    },
+    {
+        "uniqueID": "rainOpacity",
+        "type": "number",
+        "title": "键雨透明度 / Rain opacity",
+        "description": "0 - 100，键雨方块的亮度。",
+        "value": 85
+    },
+    {
+        "uniqueID": "rainFlowSpeed",
+        "type": "number",
+        "title": "键雨流速 / Rain speed",
+        "description": "每秒长高 / 每秒向上飘的像素数，对应 KeyViewer 的 Rain Speed，默认 400。",
+        "value": 400
+    },
+    {
+        "uniqueID": "rainBarLength",
+        "type": "number",
+        "title": "键雨最大长度 / Max bar length",
+        "description": "`bar` 模式下按住时最多长到多长（对应 KeyViewer 的 Rain Length，默认 400）。以 56px 方块为基准，Overlay 变小时会一起缩小。超过 Overlay 高度也没关系，超出的部分会被裁掉。",
+        "value": 400
+    },
+    {
+        "uniqueID": "rainRoundness",
+        "type": "number",
+        "title": "键雨圆角 % / Rain roundness",
+        "description": "键雨方块的圆角百分比，0 = 直角。",
+        "value": 0
+    },
+    {
+        "uniqueID": "rainFadePosition",
+        "type": "number",
+        "title": "键雨渐出距离 % / Rain fade distance",
+        "description": "键雨从「刚离开正方体」到「完全消失」之间，渐出过程占键雨区域高度的百分比。30 = 在顶部往下 30% 的高度内完成渐出（默认）；100 = 整条键雨区域都在渐出，长条刚长出来就已经很淡；0 = 不渐出。Overlay 大小改变时会自动重新换算。",
+        "value": 30
+    },
+    {
+        "uniqueID": "rainMinAlpha",
+        "type": "number",
+        "title": "键雨残留透明度 % / Rain minimum alpha",
+        "description": "键雨完全渐出后剩下的透明度。0 = 完全消失，大于 0 时会留一点痕迹。",
+        "value": 0
+    },
+    {
+        "uniqueID": "HEADERADVANCED",
+        "type": "header",
+        "title": "其他 / Advanced",
+        "description": "",
+        "value": ""
+    },
+    {
+        "uniqueID": "fixAnalyserOnStateChange",
+        "type": "checkbox",
+        "title": "修复相邻卡片卡住 / Fix stuck neighbour card",
+        "description": "给 ManiaMapAnalyser 的兜底。它的卡片偶尔会卡在旧的显示状态（该隐藏时不隐藏），刷新页面才恢复——那是合成层帧陈旧，它自己修不好。\n独立脚本 mma-visibility-guard.js 会每 0.25 秒比对「游戏状态 + 它自己的 Card Visibility」和「卡片实际状态」，不一致就纠正并强制重绘；可见性切换时也会重绘一次（这一步才治陈旧帧）。它会照搬分析器自己的菜单规则（主菜单强制隐藏），所以不会和它打架、不会闪烁。不改外观、不影响分析速度。\n勾上 = 脚本生效；不勾 = 让它停手。\n需要先运行 INSTALL.bat 把脚本装到 analyser 页面上。",
+        "value": false
+    },
+    {
+        "uniqueID": "debugStatus",
+        "type": "checkbox",
+        "title": "显示调试信息 / Debug status",
+        "description": "在 Overlay 左上角显示按键数量、可见区域、键雨数量和当前按下的键，方便调整尺寸。",
+        "value": false
+    },
+    {
+        "uniqueID": "resetSettings",
+        "type": "text",
+        "title": "重置设置 / Reset settings",
+        "description": "在输入框里填入任意新内容（例如 1、2、3……）然后点 Update settings，Overlay 会把所有设置恢复成 `settings.json` 里的默认值。每改一次内容触发一次。",
+        "value": ""
+    }
+]

@@ -1,0 +1,3342 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>keyviewer_awa</title>
+        <style>
+            * {
+                box-sizing: border-box;
+            }
+
+            html,
+            body {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                overflow: hidden;
+                background: transparent;
+            }
+
+            body {
+                font-family: 'Segoe UI', Roboto, 'Microsoft YaHei', Arial,
+                    sans-serif;
+            }
+
+            #overlay_host {
+                position: relative;
+                width: 100%;
+                height: 100%;
+            }
+
+            #rain_canvas {
+                position: absolute;
+                left: 0;
+                top: 0;
+                display: block;
+                pointer-events: none;
+            }
+
+            #key_squares {
+                position: absolute;
+                left: 0;
+                width: 100%;
+                display: flex;
+                flex-direction: row;
+                align-items: flex-end;
+                justify-content: center;
+            }
+
+            .keyviewer-key {
+                position: relative;
+                flex: 0 0 auto;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background-color: transparent;
+                overflow: hidden;
+                /* keep the frame from being cut by the canvas */
+                contain: paint;
+            }
+
+            .keyviewer-key .keyv-glow {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                height: 100%;
+                pointer-events: none;
+                opacity: 0;
+                transition: opacity 60ms linear;
+            }
+
+            .keyviewer-key .keyv-letter {
+                position: relative;
+                display: block;
+                max-width: 100%;
+                line-height: 1;
+                text-align: center;
+                white-space: nowrap;
+                user-select: none;
+                -webkit-user-select: none;
+                font-weight: 700;
+                transform: translateY(1px);
+            }
+        </style>
+    </head>
+    <body>
+        <div id="overlay_host">
+            <canvas id="rain_canvas"></canvas>
+            <div id="key_squares"></div>
+        </div>
+
+        <script>
+            (function () {
+                'use strict';
+
+                /* ------------------------------------------------------------------ *
+                 * 1. Default settings (must mirror settings.json)
+                 *
+                 * uniqueID must be alphanumeric only: tosu runs
+                 * uniqueID.replace(/[^a-z0-9]/gim, '') on every save, and a stored
+                 * id containing "_" would then never match again.
+                 * ------------------------------------------------------------------ */
+
+                var DEFAULTS = {
+                    /* ------------------------------------------------------------ *
+                     * Locked values.
+                     *
+                     * These four used to be Dashboard settings. They are no
+                     * longer exposed, but the FEATURES are all still here - the
+                     * code paths below are unchanged. The values are pinned to
+                     * the ones that were picked, and applying a setting can no
+                     * longer change them.
+                     *
+                     *   inputMode    'game'  -> read keys from tosu, not from
+                     *                           keyboard events. Works without
+                     *                           keyboard focus, which is what OBS
+                     *                           needs, and is what mania 4k uses.
+                     *   inputProbeMs 4000    -> only relevant to the 'auto'
+                     *                           probe, kept so the probe code is
+                     *                           untouched.
+                     *   gameSlots    k1 k2 m1 m2 -> tosu's four counter slots,
+                     *                           one per square, in order.
+                     *   rainMode     'bar'   -> KeyViewer's original rain: the
+                     *                           bar grows upward from the square
+                     *                           while held, then drifts and fades.
+                     *                           The 'blocks' mode is still
+                     *                           implemented below and still
+                     *                           reachable via ?config=.
+                     * ------------------------------------------------------------ */
+                    inputMode: 'game',
+                    inputProbeMs: 4000,
+                    gameSlots: 'k1\nk2\nm1\nm2',
+                    rainMode: 'bar',
+                    showInputStatus: false,
+                    /* the text shown on the four squares, in order. Blank lines keep
+                       the name of the slot feeding that square (K1, K2, M1, M2). */
+                    displayText: 'Z\nX\nC\nY'.replace('Y', 'V'),
+                    /* true = only visible while a map is being played */
+                    showDuringPlay: false,
+                    /* opt-in: reload a neighbouring ManiaMapAnalyser when its card
+                       sticks on a stale visibility. Off by default because it is a
+                       repair for someone else's bug, not part of this overlay. */
+                    fixAnalyserOnStateChange: false,
+                    /* 'precise' keeps the key stream on the endpoint the key viewer
+                       has always used; 'general' moves it to the slower endpoint that
+                       also carries game state (fewer sockets, slower keys) */
+                    gameSocket: 'precise',
+
+                    squareSize: 56,
+                    squareScale: 100,
+                    squareGap: 8,
+                    borderWidth: 2,
+                    borderRadius: 8,
+                    letterScale: 100,
+
+                    borderColor: '#ffffff',
+                    borderOpacity: 100,
+                    letterColor: '#ffffff',
+                    letterOpacity: 100,
+                    pressColor: '#ff66aa',
+                    pressOpacity: 80,
+                    releaseColor: '#ffffff',
+                    releaseOpacity: 18,
+
+                    rainColor: '#ffd6ea',
+                    rainOpacity: 85,
+                    rainFlowSpeed: 400,
+                    rainBarLength: 400,
+                    /* geometry for the optional "blocks" shape. Not exposed in the
+                       Dashboard any more, but kept so both shapes stay valid. */
+                    rainBlockHeight: 14,
+                    rainBlockWidth: 100,
+                    rainBarGap: 14,
+                    rainRoundness: 0,
+                    rainFadePosition: 30,
+                    rainMinAlpha: 0,
+
+                    debugStatus: false
+                };
+
+                var NUMERIC_LIMITS = {
+                    inputProbeMs: [100, 600000],
+                    squareSize: [8, 400],
+                    squareScale: [20, 400],
+                    squareGap: [0, 200],
+                    borderWidth: [0, 40],
+                    borderRadius: [0, 200],
+                    letterScale: [20, 400],
+                    borderOpacity: [0, 100],
+                    letterOpacity: [0, 100],
+                    pressOpacity: [0, 100],
+                    releaseOpacity: [0, 100],
+                    rainOpacity: [0, 100],
+                    rainFlowSpeed: [0, 4000],
+                    rainBarLength: [4, 4000],
+                    rainRoundness: [0, 100],
+                    rainFadePosition: [0, 100],
+                    rainMinAlpha: [0, 100]
+                };
+
+                var BOOLEAN_KEYS = [
+                    'debugStatus',
+                    'showInputStatus',
+                    'showDuringPlay',
+                    'fixAnalyserOnStateChange'
+                ];
+
+                /* Settings whose value is fixed: they used to be Dashboard
+                   options and were removed from settings.json, but every code
+                   path that uses them is still here. Pinning them means an old
+                   values file or a stale broadcast cannot bring the old value
+                   back. `?config=` still overrides them on purpose, so the
+                   alternative behaviours stay reachable without a UI. */
+                var LOCKED_SETTINGS = [
+                    'inputMode',
+                    'inputProbeMs',
+                    'gameSlots',
+                    'rainMode'
+                ];
+
+                /* ------------------------------------------------------------------ *
+                 * 2. Keyboard knowledge base
+                 *    event.code is layout independent, which is what a key viewer
+                 *    wants. We still keep a large alias table so users may type
+                 *    "ctrl", "numpad1", "space", "shift right", "F12", ";" ... 
+                 * ------------------------------------------------------------------ */
+
+                /* numbers: event.code -> [letter, shifted letter] */
+                var SYMBOL_MAP = {
+                    Backquote: ['`', '~'],
+                    Minus: ['-', '_'],
+                    Equal: ['=', '+'],
+                    BracketLeft: ['[', '{'],
+                    BracketRight: [']', '}'],
+                    Backslash: ['\\', '|'],
+                    Semicolon: [';', ':'],
+                    Quote: ["'", '"'],
+                    Comma: [',', '<'],
+                    Period: ['.', '>'],
+                    Slash: ['/', '?'],
+                    Space: [' ', ' ']
+                };
+
+                var NUMPAD_SYMBOLS = [
+                    'NumpadDivide',
+                    'NumpadMultiply',
+                    'NumpadSubtract',
+                    'NumpadAdd',
+                    'NumpadDecimal',
+                    'NumpadComma'
+                ];
+
+                var NUMPAD_LETTERS = {
+                    NumpadDivide: '/',
+                    NumpadMultiply: '*',
+                    NumpadSubtract: '-',
+                    NumpadAdd: '+',
+                    NumpadComma: ',',
+                    NumpadDecimal: '.',
+                    NumpadEnter: 'ENT',
+                    NumpadEqual: '='
+                };
+
+                /* optional compact labels, so narrow squares stay readable */
+                var SHORT_LABELS = {
+                    Space: 'SPC',
+                    Enter: 'ENT',
+                    NumpadEnter: 'ENT',
+                    Backspace: 'BSP',
+                    Delete: 'DEL',
+                    Insert: 'INS',
+                    Escape: 'ESC',
+                    CapsLock: 'CAP',
+                    Tab: 'TAB',
+                    ShiftLeft: 'SH',
+                    ShiftRight: 'RSH',
+                    ControlLeft: 'CT',
+                    ControlRight: 'RCT',
+                    AltLeft: 'AL',
+                    AltRight: 'RAL',
+                    MetaLeft: 'WIN',
+                    MetaRight: 'RWN',
+                    ContextMenu: 'MNU',
+                    PageUp: 'PGU',
+                    PageDown: 'PGD',
+                    PrintScreen: 'PRT',
+                    ScrollLock: 'SCR',
+                    NumLock: 'NUM',
+                    Pause: 'PSE',
+                    ArrowLeft: '\u2190',
+                    ArrowRight: '\u2192',
+                    ArrowUp: '\u2191',
+                    ArrowDown: '\u2193',
+                    NumpadAdd: 'N+',
+                    NumpadSubtract: 'N-',
+                    NumpadMultiply: 'N*',
+                    NumpadDivide: 'N/',
+                    NumpadDecimal: 'N.',
+                    NumpadComma: 'N,',
+                    NumpadEqual: 'N='
+                };
+
+                var ALL_CODES = [];
+                var charMap = {};
+                var shiftCharMap = {};
+                var aliasMap = {};
+                var labelLookup = {};
+
+                (function buildKeyDatabase() {
+                    function addCode(code, letter, shifted) {
+                        ALL_CODES.push(code);
+                        charMap[code] = letter;
+                        shiftCharMap[code] = shifted || letter;
+                    }
+
+                    function addAlias(name, code) {
+                        var key = String(name).toLowerCase();
+                        if (!aliasMap[key]) aliasMap[key] = code;
+                    }
+
+                    /* letters */
+                    for (var i = 0; i < 26; i++) {
+                        var letter = String.fromCharCode(65 + i);
+                        addCode('Key' + letter, letter, letter);
+                    }
+
+                    /* number row */
+                    var digitShift = [')', '!', '@', '#', '$', '%', '^', '&', '*', '('];
+                    for (var n = 0; n <= 9; n++) {
+                        addCode('Digit' + n, String(n), digitShift[n]);
+                    }
+
+                    /* function keys */
+                    for (var f = 1; f <= 24; f++) addCode('F' + f, 'F' + f, 'F' + f);
+
+                    /* symbols */
+                    var symbolCodes = Object.keys(SYMBOL_MAP);
+                    for (var s = 0; s < symbolCodes.length; s++) {
+                        var sc = symbolCodes[s];
+                        addCode(sc, SYMBOL_MAP[sc][0], SYMBOL_MAP[sc][1]);
+                    }
+
+                    /* modifiers, both sides */
+                    addCode('ControlLeft', 'CTRL', 'CTRL');
+                    addCode('ControlRight', 'RCTRL', 'RCTRL');
+                    addCode('ShiftLeft', 'SHIFT', 'SHIFT');
+                    addCode('ShiftRight', 'RSHIFT', 'RSHIFT');
+                    addCode('AltLeft', 'ALT', 'ALT');
+                    addCode('AltRight', 'RALT', 'RALT');
+                    addCode('MetaLeft', 'WIN', 'WIN');
+                    addCode('MetaRight', 'RWIN', 'RWIN');
+                    addCode('ContextMenu', 'MENU', 'MENU');
+
+                    /* editing / navigation / locks / system */
+                    var named = {
+                        Escape: 'ESC',
+                        Tab: 'TAB',
+                        CapsLock: 'CAPS',
+                        Backspace: 'BKSP',
+                        Enter: 'ENTER',
+                        Insert: 'INS',
+                        Delete: 'DEL',
+                        Home: 'HOME',
+                        End: 'END',
+                        PageUp: 'PGUP',
+                        PageDown: 'PGDN',
+                        ArrowLeft: '\u2190',
+                        ArrowRight: '\u2192',
+                        ArrowUp: '\u2191',
+                        ArrowDown: '\u2193',
+                        PrintScreen: 'PRTSC',
+                        ScrollLock: 'SCRLK',
+                        Pause: 'PAUSE',
+                        NumLock: 'NUMLK'
+                    };
+                    var namedCodes = Object.keys(named);
+                    for (var c = 0; c < namedCodes.length; c++)
+                        addCode(namedCodes[c], named[namedCodes[c]], named[namedCodes[c]]);
+
+                    /* media & browser & IME keys, reported by Windows/Chromium */
+                    var media = {
+                        IntlBackslash: '\\',
+                        IntlRo: '\\',
+                        IntlYen: '\u00a5',
+                        Convert: 'HENK',
+                        NonConvert: 'MUHEN',
+                        KanaMode: 'KANA',
+                        Lang1: 'HANJA',
+                        Lang2: 'HAN/Y',
+                        Lang3: 'LANG3',
+                        Lang4: 'LANG4',
+                        Lang5: 'LANG5',
+                        AudioVolumeMute: 'MUTE',
+                        AudioVolumeDown: 'VOL-',
+                        AudioVolumeUp: 'VOL+',
+                        MediaTrackNext: 'NEXT',
+                        MediaTrackPrevious: 'PREV',
+                        MediaStop: 'STOP',
+                        MediaPlayPause: 'PLAY',
+                        BrowserBack: 'BACK',
+                        BrowserForward: 'FWD',
+                        BrowserRefresh: 'REFR',
+                        BrowserStop: 'BSTOP',
+                        BrowserSearch: 'SRCH',
+                        BrowserFavorites: 'FAV',
+                        BrowserHome: 'BHOME',
+                        LaunchMail: 'MAIL',
+                        LaunchApp1: 'APP1',
+                        LaunchApp2: 'APP2'
+                    };
+                    var mediaCodes = Object.keys(media);
+                    for (var m = 0; m < mediaCodes.length; m++)
+                        addCode(mediaCodes[m], media[mediaCodes[m]], media[mediaCodes[m]]);
+
+                    /* numpad */
+                    for (var k = 0; k <= 9; k++) {
+                        addCode('Numpad' + k, String(k), String(k));
+                        addAlias('num' + k, 'Numpad' + k);
+                        if (k > 0) addAlias('kp' + k, 'Numpad' + k);
+                    }
+                    for (var q = 0; q < NUMPAD_SYMBOLS.length; q++) {
+                        var nc = NUMPAD_SYMBOLS[q];
+                        addCode(nc, NUMPAD_LETTERS[nc], NUMPAD_LETTERS[nc]);
+                    }
+                    addCode('NumpadEnter', 'ENT', 'ENT');
+                    addCode('NumpadEqual', '=', '=');
+
+                    /* ---------------- aliases ---------------- */
+                    for (var a = 0; a < 26; a++) {
+                        var al = String.fromCharCode(65 + a);
+                        addAlias(al, 'Key' + al);
+                        addAlias('key' + al, 'Key' + al);
+                        aliasMap[al.toLowerCase()] = 'Key' + al;
+                    }
+                    for (var d = 0; d <= 9; d++) {
+                        addAlias(String(d), 'Digit' + d);
+                        addAlias('digit' + d, 'Digit' + d);
+                    }
+
+                    var aliasList = {
+                        ctrl: 'ControlLeft',
+                        control: 'ControlLeft',
+                        ctrlleft: 'ControlLeft',
+                        controlleft: 'ControlLeft',
+                        leftctrl: 'ControlLeft',
+                        leftcontrol: 'ControlLeft',
+                        ctrlright: 'ControlRight',
+                        controlright: 'ControlRight',
+                        rightctrl: 'ControlRight',
+                        rightcontrol: 'ControlRight',
+                        shift: 'ShiftLeft',
+                        shiftleft: 'ShiftLeft',
+                        leftshift: 'ShiftLeft',
+                        shiftright: 'ShiftRight',
+                        rightshift: 'ShiftRight',
+                        alt: 'AltLeft',
+                        altleft: 'AltLeft',
+                        leftalt: 'AltLeft',
+                        option: 'AltLeft',
+                        altright: 'AltRight',
+                        rightalt: 'AltRight',
+                        altgr: 'AltRight',
+                        win: 'MetaLeft',
+                        windows: 'MetaLeft',
+                        super: 'MetaLeft',
+                        cmd: 'MetaLeft',
+                        command: 'MetaLeft',
+                        meta: 'MetaLeft',
+                        lwin: 'MetaLeft',
+                        rwin: 'MetaRight',
+                        menu: 'ContextMenu',
+                        contextmenu: 'ContextMenu',
+                        app: 'ContextMenu',
+
+                        esc: 'Escape',
+                        escape: 'Escape',
+                        tab: 'Tab',
+                        caps: 'CapsLock',
+                        capslock: 'CapsLock',
+                        bksp: 'Backspace',
+                        back: 'Backspace',
+                        backspace: 'Backspace',
+                        enter: 'Enter',
+                        return: 'Enter',
+                        ins: 'Insert',
+                        insert: 'Insert',
+                        del: 'Delete',
+                        delete: 'Delete',
+                        home: 'Home',
+                        end: 'End',
+                        pageup: 'PageUp',
+                        pgup: 'PageUp',
+                        pagedown: 'PageDown',
+                        pgdn: 'PageDown',
+                        arrowleft: 'ArrowLeft',
+                        left: 'ArrowLeft',
+                        arrowright: 'ArrowRight',
+                        right: 'ArrowRight',
+                        arrowup: 'ArrowUp',
+                        up: 'ArrowUp',
+                        arrowdown: 'ArrowDown',
+                        down: 'ArrowDown',
+                        prtsc: 'PrintScreen',
+                        printscreen: 'PrintScreen',
+                        scrlk: 'ScrollLock',
+                        scrolllock: 'ScrollLock',
+                        pause: 'Pause',
+                        numlk: 'NumLock',
+                        numlock: 'NumLock',
+
+                        spacebar: 'Space',
+                        space: 'Space',
+
+                        numpad0: 'Numpad0',
+                        numpad1: 'Numpad1',
+                        numpad2: 'Numpad2',
+                        numpad3: 'Numpad3',
+                        numpad4: 'Numpad4',
+                        numpad5: 'Numpad5',
+                        numpad6: 'Numpad6',
+                        numpad7: 'Numpad7',
+                        numpad8: 'Numpad8',
+                        numpad9: 'Numpad9',
+                        numpadenter: 'NumpadEnter',
+                        numpadadd: 'NumpadAdd',
+                        numpadsub: 'NumpadSubtract',
+                        numpadsu: 'NumpadSubtract',
+                        numpadmul: 'NumpadMultiply',
+                        numpaddiv: 'NumpadDivide',
+                        numpaddec: 'NumpadDecimal',
+                        numpadcomma: 'NumpadComma',
+                        ';': 'Semicolon',
+                        ':': 'Semicolon',
+                        "'": 'Quote',
+                        '"': 'Quote',
+                        ',': 'Comma',
+                        '<': 'Comma',
+                        '.': 'Period',
+                        '>': 'Period',
+                        '/': 'Slash',
+                        '?': 'Slash',
+                        '\\': 'Backslash',
+                        '|': 'Backslash',
+                        '-': 'Minus',
+                        _: 'Minus',
+                        '=': 'Equal',
+                        '+': 'Equal',
+                        '[': 'BracketLeft',
+                        '{': 'BracketLeft',
+                        ']': 'BracketRight',
+                        '}': 'BracketRight',
+                        '`': 'Backquote',
+                        '~': 'Backquote'
+                    };
+                    var aliasNames = Object.keys(aliasList);
+                    for (var an = 0; an < aliasNames.length; an++)
+                        addAlias(aliasNames[an], aliasList[aliasNames[an]]);
+
+                    /* label reverse lookup, so a player may simply type the letter
+                       they see on their keyboard, e.g. "RCTRL", "PGDN", "N1" */
+                    for (var lc = 0; lc < ALL_CODES.length; lc++) {
+                        var codeX = ALL_CODES[lc];
+                        var lbl = String(charMap[codeX]).toLowerCase();
+                        addAlias(lbl, codeX);
+                        addAlias(codeX.toLowerCase(), codeX);
+                        if (!labelLookup[lbl]) labelLookup[lbl] = codeX;
+                    }
+                })();
+
+                /* Map a user typed token onto an event.code, or null when unknown. */
+                function resolveCode(raw) {
+                    if (raw == null) return null;
+
+                    var input = String(raw).trim();
+                    if (!input) return null;
+
+                    /* "KeyZ=Z" lets a player pin an explicit letter */
+                    var eq = input.indexOf('=');
+                    if (eq > 0) input = input.slice(0, eq).trim();
+                    if (!input) return null;
+
+                    /* exact code, case sensitive list first */
+                    for (var i = 0; i < ALL_CODES.length; i++) {
+                        if (ALL_CODES[i] === input) return input;
+                    }
+
+                    var lower = input.toLowerCase();
+                    var folded = lower.replace(/[\s_-]+/g, '');
+
+                    if (aliasMap[lower]) return aliasMap[lower];
+                    if (aliasMap[folded]) return aliasMap[folded];
+
+                    if (input.length > 1) return null;
+
+                    /* last resort: the physical letter printed on the key */
+                    var single = labelLookup[lower];
+                    if (single) return single;
+
+                    return null;
+                }
+
+                function explicitLabel(raw) {
+                    if (raw == null) return null;
+                    var eq = String(raw).indexOf('=');
+                    if (eq <= 0) return null;
+                    var label = String(raw).slice(eq + 1).trim();
+                    return label ? label : null;
+                }
+
+                function codeChar(code, shifted) {
+                    if (shifted && shiftCharMap[code]) {
+                        var s = shiftCharMap[code];
+                        return s === ' ' ? 'SPACE' : s;
+                    }
+                    var c = charMap[code];
+                    if (c === undefined) return code;
+                    return c === ' ' ? 'SPACE' : c;
+                }
+
+                function codeDefaultLabel(code) {
+                    if (code == null) return '--';
+                    var c = charMap[code];
+                    if (c !== undefined) return String(c);
+                    return code;
+                }
+
+                /* Display string for a resolved key. */
+                function resolveDisplay(raw, labelMode) {
+                    var label = explicitLabel(raw);
+                    if (label) return label;
+
+                    var code = resolveCode(raw);
+                    if (code == null) {
+                        var fallback = String(raw == null ? '' : raw).trim();
+                        return fallback ? fallback.slice(0, 6) : '--';
+                    }
+
+                    switch (labelMode) {
+                        case 'code':
+                            return code;
+                        case 'short':
+                            return SHORT_LABELS[code] || codeChar(code, false);
+                        case 'charShift':
+                            return codeChar(code, true);
+                        case 'char':
+                        default:
+                            return codeChar(code, false);
+                    }
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 3. Small helpers
+                 * ------------------------------------------------------------------ */
+
+                function clamp(v, limit) {
+                    if (v !== v) return limit[0];
+                    if (v < limit[0]) return limit[0];
+                    if (v > limit[1]) return limit[1];
+                    return v;
+                }
+
+                function coerceNumber(key, value, fallback) {
+                    var num = typeof value === 'number' ? value : parseFloat(value);
+                    if (num !== num || num === Infinity || num === -Infinity) {
+                        num = fallback;
+                    }
+                    var limit = NUMERIC_LIMITS[key];
+                    return limit ? clamp(num, limit) : num;
+                }
+
+                function coerceBool(value) {
+                    if (typeof value === 'boolean') return value;
+                    if (typeof value === 'string') return value.toLowerCase() === 'true';
+                    return Boolean(value);
+                }
+
+                /* "#rgb" / "#rrggbb" / "rgb(r,g,b)" / named -> [r, g, b] */
+                var NAMED_COLORS = {
+                    white: [255, 255, 255],
+                    black: [0, 0, 0],
+                    red: [255, 0, 0],
+                    green: [0, 128, 0],
+                    blue: [0, 0, 255],
+                    yellow: [255, 255, 0],
+                    cyan: [0, 255, 255],
+                    aqua: [0, 255, 255],
+                    magenta: [255, 0, 255],
+                    fuchsia: [255, 0, 255],
+                    pink: [255, 192, 203],
+                    orange: [255, 165, 0],
+                    purple: [128, 0, 128],
+                    gray: [128, 128, 128],
+                    grey: [128, 128, 128],
+                    lime: [0, 255, 0],
+                    navy: [0, 0, 128],
+                    teal: [0, 128, 128],
+                    gold: [255, 215, 0],
+                    transparent: [0, 0, 0]
+                };
+
+                function parseColor(input) {
+                    var fallback = [255, 255, 255];
+                    if (input == null) return fallback;
+
+                    var text = String(input).trim().toLowerCase();
+                    if (!text) return fallback;
+
+                    if (text.charAt(0) === '#') {
+                        var hex = text.slice(1);
+                        if (hex.length === 3 || hex.length === 4) {
+                            var r3 = parseInt(hex.charAt(0) + hex.charAt(0), 16);
+                            var g3 = parseInt(hex.charAt(1) + hex.charAt(1), 16);
+                            var b3 = parseInt(hex.charAt(2) + hex.charAt(2), 16);
+                            if (r3 === r3 && g3 === g3 && b3 === b3) return [r3, g3, b3];
+                        }
+                        if (hex.length === 6 || hex.length === 8) {
+                            var r6 = parseInt(hex.slice(0, 2), 16);
+                            var g6 = parseInt(hex.slice(2, 4), 16);
+                            var b6 = parseInt(hex.slice(4, 6), 16);
+                            if (r6 === r6 && g6 === g6 && b6 === b6) return [r6, g6, b6];
+                        }
+                        return fallback;
+                    }
+
+                    var rgbMatch = text.match(/^rgba?\(([^)]+)\)$/);
+                    if (rgbMatch) {
+                        var parts = rgbMatch[1].split(',');
+                        if (parts.length >= 3) {
+                            var r8 = parseInt(parts[0], 10);
+                            var g8 = parseInt(parts[1], 10);
+                            var b8 = parseInt(parts[2], 10);
+                            if (r8 === r8 && g8 === g8 && b8 === b8) return [r8, g8, b8];
+                        }
+                        return fallback;
+                    }
+
+                    if (NAMED_COLORS[text]) return NAMED_COLORS[text];
+
+                    /* allow a bare hex string without "#" */
+                    if (/^[0-9a-f]{6}$/.test(text)) {
+                        return [
+                            parseInt(text.slice(0, 2), 16),
+                            parseInt(text.slice(2, 4), 16),
+                            parseInt(text.slice(4, 6), 16)
+                        ];
+                    }
+
+                    return fallback;
+                }
+
+                function cssColor(rgb, alpha) {
+                    var a = alpha === undefined ? 1 : clamp(alpha, [0, 1]);
+                    return (
+                        'rgba(' +
+                        Math.round(rgb[0]) +
+                        ',' +
+                        Math.round(rgb[1]) +
+                        ',' +
+                        Math.round(rgb[2]) +
+                        ',' +
+                        (Math.round(a * 1000) / 1000) +
+                        ')'
+                    );
+                }
+
+                function parseKeyList(text) {
+                    if (text == null) return null;
+                    var raw = Array.isArray(text) ? text.join('\n') : String(text);
+                    var out = [];
+                    var lines = raw.split(/\r?\n/);
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (line) out.push(line);
+                    }
+                    return out.length ? out : null;
+                }
+
+                /* ---- game input slots (tosu's keys.k1/k2/m1/m2) ---- */
+                var GAME_SLOT_BY_LABEL = { K1: 'k1', K2: 'k2', M1: 'm1', M2: 'm2' };
+
+                function slotFromCode(input) {
+                    if (input == null) return null;
+                    return GAME_SLOT_BY_LABEL[String(input).trim().toUpperCase()] || null;
+                }
+
+                /* k1 k2 m1 m2  |  k1=KeyZ k2=KeyX  |  k1 k1 k2 k2
+                   Slots are assigned left to right; "k1=KeyZ" additionally pins
+                   that slot to the physical key, so the same key drives both
+                   input sources. */
+                function parseGameSlots(raw, count) {
+                    var slots = new Array(count);
+                    var pinned = new Array(count);
+                    var pinnedSlot = new Array(count);
+                    var nextSlot = 0;
+                    var nextPin = 0;
+
+                    var text = raw == null ? '' : String(raw);
+                    var lines = text.split(/\r?\n/);
+
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].replace(/#.*$/, '').trim();
+                        if (!line) continue;
+
+                        var parts = line.split('=');
+                        var slot = null;
+
+                        if (parts.length >= 2) {
+                            var left = parts[0].trim().toUpperCase();
+                            var right = parts.slice(1).join('=').trim();
+                            slot = GAME_SLOT_BY_LABEL[left] || null;
+
+                            if (slot) {
+                                var code = resolveCode(right);
+                                if (code && nextPin < count) {
+                                    pinned[nextPin] = code;
+                                    pinnedSlot[nextPin] = slot;
+                                    nextPin++;
+                                }
+                            }
+                        }
+
+                        if (!slot) slot = slotFromCode(line);
+                        if (!slot) continue;
+
+                        while (nextSlot < count && slots[nextSlot]) nextSlot++;
+                        if (nextSlot >= count) break;
+                        slots[nextSlot] = slot;
+                        nextSlot++;
+                    }
+
+                    return { slots: slots, pinned: pinned, pinnedSlot: pinnedSlot };
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 4. State
+                 * ------------------------------------------------------------------ */
+
+                var settings = {};
+                var view = {};
+                var keys = [];
+                var squares = [];
+                var showDebug = false;
+
+                var rainCanvas = null;
+                var rainCtx = null;
+                var squaresEl = null;
+                var hostEl = null;
+
+                var canvasWidth = 0;
+                var canvasHeight = 0;
+                var dpr = 1;
+
+                var rain = [];
+                var lastFrame = 0;
+                var rafId = 0;
+
+                var layout = {
+                    square: DEFAULTS.squareSize,
+                    letter: DEFAULTS.squareSize * 0.5,
+                    gap: DEFAULTS.squareGap,
+                    rowHeight: 0,
+                    rainHeight: 0,
+                    fadeY: 0,
+                    rowWidth: 0
+                };
+
+                var debugEl = null;
+                var debugFrames = 0;
+                var loopErrorReported = false;
+
+                /* ------------------------------------------------------------------ *
+                 * Frame pacing meter.
+                 *
+                 * "The rain stutters in game" has two very different causes, and the
+                 * fix depends on which one it is:
+                 *
+                 *   steady 16.7ms          -> a real 60fps. Judder next to a 200fps
+                 *                             game is a contrast effect, not a fault.
+                 *   mean 60 but wild spread -> the frames arrive, the pacing is
+                 *                             uneven. That is what to fix.
+                 *   mean around 30          -> the host is capping the overlay.
+                 *
+                 * Only min/mean/max of the last 120 intervals can tell those apart, so
+                 * the debug readout reports all three. Arithmetic only - no allocation
+                 * per frame beyond one slot in a preallocated ring.
+                 * ------------------------------------------------------------------ */
+                var FRAME_SAMPLE_COUNT = 120;
+                var frameIntervals = new Float64Array(FRAME_SAMPLE_COUNT);
+                var frameIntervalCount = 0;
+                var frameIntervalNext = 0;
+
+                function noteFrameInterval(ms) {
+                    if (!(ms > 0) || ms > 5000) return;
+                    frameIntervals[frameIntervalNext] = ms;
+                    frameIntervalNext = (frameIntervalNext + 1) % FRAME_SAMPLE_COUNT;
+                    if (frameIntervalCount < FRAME_SAMPLE_COUNT) frameIntervalCount++;
+                }
+
+                function framePacing() {
+                    if (frameIntervalCount < 2) return null;
+                    var min = Infinity;
+                    var max = 0;
+                    var total = 0;
+                    for (var i = 0; i < frameIntervalCount; i++) {
+                        var value = frameIntervals[i];
+                        if (value < min) min = value;
+                        if (value > max) max = value;
+                        total += value;
+                    }
+                    var mean = total / frameIntervalCount;
+                    return {
+                        min: min,
+                        mean: mean,
+                        max: max,
+                        fps: mean > 0 ? 1000 / mean : 0
+                    };
+                }
+
+                function framePacingText() {
+                    var pacing = framePacing();
+                    if (!pacing) return 'fps=measuring';
+                    return (
+                        'fps=' +
+                        pacing.fps.toFixed(1) +
+                        ' frame=' +
+                        pacing.min.toFixed(1) +
+                        '/' +
+                        pacing.mean.toFixed(1) +
+                        '/' +
+                        pacing.max.toFixed(1) +
+                        'ms(min/avg/max n=' +
+                        frameIntervalCount +
+                        ')'
+                    );
+                }
+
+                function isDebug() {
+                    return showDebug;
+                }
+
+                function log() {
+                    if (!isDebug() || !window.console) return;
+                    var args = Array.prototype.slice.call(arguments);
+                    args.unshift('[keyviewer_awa]');
+                    console.log.apply(console, args);
+                }
+
+                /* ---- display text for the four squares ---- */
+                var FIXED_KEY_COUNT = 4;
+
+                /* Each line is one square, in order. A blank line keeps the slot name
+                   (K1/K2/M1/M2). A single token with no separators is split per
+                   character, so "ZXCV" behaves like "Z X C V". */
+                function parseDisplayText(raw, count) {
+                    var text = raw == null ? '' : String(raw);
+                    var lines = text.split(/\r?\n/).map(function (line) {
+                        return line.trim();
+                    });
+
+                    var meaningful = lines.filter(function (line) {
+                        return line !== '';
+                    });
+
+                    if (meaningful.length === 1 && count > 1) {
+                        var compact = meaningful[0].replace(/\s+/g, '');
+                        var perChar = [];
+                        for (var c = 0; c < compact.length; c++) {
+                            perChar.push(compact.charAt(c));
+                        }
+                        if (perChar.length > 1 && perChar.length <= count) {
+                            lines = perChar;
+                        }
+                    }
+
+                    var out = [];
+                    for (var i = 0; i < count; i++) {
+                        out.push(lines[i] !== undefined ? lines[i] : '');
+                    }
+                    return out;
+                }
+
+                /* Try to read a display label as a physical key, e.g. "Z" -> KeyZ,
+                   "." -> Period, "SPACE" -> Space. Returns null when the label is not
+                   a key name, in which case the square only follows the game data. */
+                function parseDisplayKey(label) {
+                    if (!label) return null;
+
+                    var token = String(label).trim();
+                    if (!token) return null;
+                    if (token.length > 12) return null;
+
+                    /* one character only: the keyboard knowledge base maps the printed
+                       character back to its physical key */
+                    if (token.length === 1) {
+                        return resolveCode(token);
+                    }
+
+                    return resolveCode(token) || resolveCode(token.toLowerCase());
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 5. Building keys and the DOM
+                 * ------------------------------------------------------------------ */
+
+                function buildKeys() {
+                    /* The square count is fixed: the overlay always shows four keys,
+                       and the display text decides only what those four squares say.
+                       Nothing here changes how presses are detected or shown. */
+                    var count = FIXED_KEY_COUNT;
+                    var displays = parseDisplayText(view.displayText, count);
+
+                    /* rebuilds happen whenever the Dashboard saves settings; a player
+                       may be holding a key at that exact moment, so carry the pressed
+                       keys over instead of dropping them */
+                    var heldCodes = {};
+                    for (var h = 0; h < keys.length; h++) {
+                        if (keys[h].pressed && keys[h].code) heldCodes[keys[h].code] = true;
+                    }
+
+                    var slotPlan = parseGameSlots(view.gameSlots, count);
+                    var slots = slotPlan.slots;
+                    slotPlanConfigured = slots.some(function (slot) {
+                        return Boolean(slot);
+                    });
+                    autoSlotsDone = false;
+
+                    keys = [];
+                    for (var i = 0; i < count; i++) {
+                        /* Optional keyboard source. The game slot line can pin a key
+                           explicitly ("k1=KeyZ"); otherwise the display text itself is
+                           tried as a key name, so the default Z/X/C/V still answers to
+                           the physical Z, X, C and V keys. This is what keeps the
+                           keyboard source working now that there is no key list. */
+                        var code = slotPlan.pinned[i] || null;
+                        if (!code) code = parseDisplayKey(displays[i]);
+
+                        var slot = slots[i] || slotPlan.pinnedSlot[i] || null;
+
+                        keys.push({
+                            gameSlot: slot,
+                            code: code,
+                            display: displays[i],
+                            label: displays[i] || (slot ? slot.toUpperCase() : ''),
+                            keyboardPressed: code ? heldCodes[code] === true : false,
+                            gamePressed: false,
+                            pressed: false
+                        });
+
+                        var key = keys[i];
+                        key.pressed = key.keyboardPressed || key.gamePressed;
+                    }
+
+                    var existing = squaresEl.children;
+                    while (existing.length > count) {
+                        squaresEl.removeChild(existing[existing.length - 1]);
+                    }
+                    while (existing.length < count) {
+                        var square = document.createElement('div');
+                        square.className = 'keyviewer-key';
+
+                        var glow = document.createElement('div');
+                        glow.className = 'keyv-glow';
+
+                        var letter = document.createElement('span');
+                        letter.className = 'keyv-letter';
+
+                        square.appendChild(glow);
+                        square.appendChild(letter);
+                        squaresEl.appendChild(square);
+                    }
+
+                    squares = [];
+                    for (var s = 0; s < count; s++) {
+                        squares.push({
+                            root: squaresEl.children[s],
+                            glow: squaresEl.children[s].children[0],
+                            letter: squaresEl.children[s].children[1]
+                        });
+                    }
+                }
+
+                function computeLayout() {
+                    var hostRect = hostEl.getBoundingClientRect();
+                    var width = hostRect.width || window.innerWidth || 0;
+                    var height = hostRect.height || window.innerHeight || 0;
+
+                    var size = view.squareSize * (view.squareScale / 100);
+                    var gap = view.squareGap;
+                    var count = keys.length;
+                    var rowWidth = size * count + gap * Math.max(0, count - 1);
+
+                    /* keep every square visible when the overlay is narrower */
+                    var available = Math.max(40, width - 2);
+                    if (rowWidth > available && count > 0) {
+                        var shrink = available / rowWidth;
+                        size = Math.max(4, size * shrink);
+                        gap = gap * shrink;
+                        rowWidth = size * count + gap * Math.max(0, count - 1);
+                    }
+
+                    layout.square = size;
+                    layout.gap = gap;
+                    layout.rowWidth = rowWidth;
+                    layout.letter = size * 0.5 * (view.letterScale / 100);
+                    layout.rowHeight = size;
+
+                    squaresEl.style.height = Math.ceil(size + view.borderWidth * 2) + 'px';
+                    squaresEl.style.bottom = '0px';
+
+                    layout.rainHeight = Math.max(
+                        0,
+                        height - Math.ceil(size + view.borderWidth * 2)
+                    );
+                    layout.fadeY = layout.rainHeight * (view.rainFadePosition / 100);
+                }
+
+                var FAMILY = "'Segoe UI', Roboto, 'Microsoft YaHei', Arial, sans-serif";
+                var measureCtx = null;
+
+                function fontString(size) {
+                    return '700 ' + size.toFixed(1) + 'px ' + FAMILY;
+                }
+
+                function measureText(ctx, text, size) {
+                    ctx.font = fontString(size);
+                    return ctx.measureText(text).width;
+                }
+
+                /* Long labels (SPACE, ENTER, ControlLeft, NumpadAdd ...) would either
+                   be clipped or run into the neighbouring square, so shrink them to
+                   about 84% of the square width. */
+                function fitTextSize(ctx, text, desired, maxWidth) {
+                    if (!text || !(desired > 0) || !(maxWidth > 0)) return desired;
+
+                    var width = measureText(ctx, text, desired);
+                    if (width <= maxWidth) return desired;
+
+                    return Math.max(5, (desired * maxWidth) / width);
+                }
+
+                /* Everything applyStyles() writes depends only on these values, so
+                   the whole pass can be skipped while they are unchanged. Without
+                   this the overlay rebuilt a radial-gradient string and re-measured
+                   every label 60 times a second while nothing was happening, which
+                   is exactly the kind of background cost that starves a neighbouring
+                   overlay (ManiaMapAnalyser) of frames. */
+                var lastStyleSignature = null;
+
+                function styleSignature() {
+                    return [
+                        layout.square,
+                        layout.gap,
+                        layout.letter,
+                        view.borderWidth,
+                        view.borderRadius,
+                        view.borderColor,
+                        view.borderOpacity,
+                        view.letterColor,
+                        view.letterOpacity,
+                        view.pressColor,
+                        view.pressOpacity,
+                        view.releaseColor,
+                        view.releaseOpacity,
+                        keys.length,
+                        keys
+                            .map(function (key) {
+                                return (
+                                    (key.pressed ? '1' : '0') +
+                                    (key.display === undefined ? '' : key.display)
+                                );
+                            })
+                            .join('|')
+                    ].join('~');
+                }
+
+                /* Force the next applyStyles() pass (after a rebuild or a resize). */
+                function invalidateStyles() {
+                    lastStyleSignature = null;
+                }
+
+                function applyStyles() {
+                    var signature = styleSignature();
+                    if (signature === lastStyleSignature) return;
+                    lastStyleSignature = signature;
+
+                    var borderColor = cssColor(parseColor(view.borderColor), view.borderOpacity / 100);
+                    var letterColor = cssColor(parseColor(view.letterColor), view.letterOpacity / 100);
+                    var releaseColor = parseColor(view.releaseColor);
+                    var pressColor = parseColor(view.pressColor);
+
+                    var releaseFill = cssColor(releaseColor, view.releaseOpacity / 100);
+                    var pressActive = view.pressOpacity / 100;
+
+                    for (var i = 0; i < squares.length; i++) {
+                        var el = squares[i];
+                        var size = layout.square;
+                        var radius = Math.min(view.borderRadius, size / 2);
+                        var border = view.borderWidth;
+
+                        var root = el.root;
+                        root.style.width = size + 'px';
+                        root.style.height = size + 'px';
+                        root.style.marginLeft = i === 0 ? '0px' : layout.gap + 'px';
+                        root.style.borderRadius = radius + 'px';
+                        root.style.border = border + 'px solid ' + borderColor;
+                        root.style.backgroundColor = releaseFill;
+
+                        /* glow reads as "press colour painted inside the frame" */
+                        var pressAlpha = pressActive * (view.pressOpacity > 0 ? 1 : 0);
+                        var innerAlpha = Math.min(1, pressAlpha);
+                        var edgeAlpha = Math.min(1, pressAlpha * 0.35);
+                        var gradient =
+                            'radial-gradient(120% 120% at 50% 50%, ' +
+                            cssColor(pressColor, innerAlpha * 0.35) +
+                            ' 0%, ' +
+                            cssColor(pressColor, edgeAlpha) +
+                            ' 55%, ' +
+                            cssColor(pressColor, pressAlpha) +
+                            ' 100%)';
+                        el.glow.style.background = gradient;
+                        el.glow.style.borderRadius = Math.max(0, radius - border) + 'px';
+                        el.glow.style.opacity = keys[i] && keys[i].pressed ? '1' : '0';
+
+                        el.letter.style.color = letterColor;
+
+                        var label = keys[i] ? labelFor(keys[i]) : '';
+                        if (el.letter.textContent !== label) {
+                            el.letter.textContent = label;
+                        }
+                        fitKeyLetter(i);
+                    }
+                }
+
+                /* shrink a label that would not fit inside its square */
+                function fitKeyLetter(index) {
+                    var el = squares[index];
+                    var key = keys[index];
+                    if (!el || !key) return;
+
+                    var size = layout.square;
+                    var innerBox = Math.max(4, size - view.borderWidth * 2);
+                    var letterSize = layout.letter;
+
+                    if (measureCtx && el.letter.textContent) {
+                        letterSize = fitTextSize(
+                            measureCtx,
+                            el.letter.textContent,
+                            layout.letter,
+                            innerBox * 0.86
+                        );
+                    }
+                    el.letter.style.fontSize = letterSize + 'px';
+                }
+
+                function resizeCanvas() {
+                    var width = hostEl.clientWidth || window.innerWidth || 0;
+                    var height = layout.rainHeight;
+                    var ratio = window.devicePixelRatio || 1;
+                    if (ratio < 1) ratio = 1;
+                    if (ratio > 3) ratio = 3;
+
+                    dpr = ratio;
+                    canvasWidth = width;
+                    canvasHeight = height;
+
+                    rainCanvas.width = Math.max(1, Math.round(width * dpr));
+                    rainCanvas.height = Math.max(1, Math.round(height * dpr));
+                    rainCanvas.style.width = width + 'px';
+                    rainCanvas.style.height = height + 'px';
+
+                    rainCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+                    /* resizing wipes the canvas, and the layout may have changed */
+                    invalidateStyles();
+                    rainNeedsRedraw = true;
+                }
+
+                function rebuild() {
+                    buildKeys();
+                    computeLayout();
+                    resizeCanvas();
+                    applyStyles();
+                }
+
+                var needsRebuild = true;
+                var frameQueued = false;
+                var rebuildCount = 0;
+
+                function scheduleRebuild() {
+                    needsRebuild = true;
+                    ensureFrame();
+                }
+
+                function scheduleRender() {
+                    ensureFrame();
+                }
+
+                /* rAF is throttled whenever the page is not actively painting (OBS
+                   preview, background tab, headless). A settings change must not wait
+                   for that, so the visual update can be applied synchronously. */
+                function runFrameUpdate() {
+                    frameQueued = false;
+                    if (needsRebuild) {
+                        needsRebuild = false;
+                        rebuildCount++;
+                        rebuild();
+                    } else {
+                        computeLayout();
+                        resizeCanvas();
+                        applyStyles();
+                    }
+                }
+
+                function ensureFrame(immediate) {
+                    if (immediate) {
+                        frameQueued = false;
+                        runFrameUpdate();
+                        return;
+                    }
+                    if (frameQueued) return;
+                    frameQueued = true;
+                    requestAnimationFrame(runFrameUpdate);
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 6. Key rain
+                 *
+                 * Faithful to modlist-org/KeyViewer (v4) Unity/Rain.cs:
+                 *
+                 *   while the key is held  -> rt.sizeDelta += delta, rt.anchoredPosition
+                 *                             += delta * 0.5
+                 *   after release          -> rt.anchoredPosition += delta
+                 *
+                 * For Direction.Up that means: the rectangle is born flush against the
+                 * square edge with height 0, and while the key is held it only GROWS -
+                 * its bottom edge never leaves the square. It stops at config.Length
+                 * (and in the original it is recycled once it grows past the mask).
+                 * After release it stops growing and the whole rectangle translates
+                 * away until it leaves the rain area.
+                 *
+                 * So "rain" is a bar that fills upward from the key while you hold it,
+                 * and drifts off once you let go - it is not a scrolling ticker.
+                 * ------------------------------------------------------------------ */
+
+                function resetRain() {
+                    rain = [];
+                    rainNeedsRedraw = true;
+                }
+
+                /* The rain canvas only has to be repainted while something is
+                   actually moving. Once the last piece is gone the canvas is cleared
+                   one final time and then left alone, so an idle overlay does no
+                   canvas work at all. */
+                var rainNeedsRedraw = true;
+
+                function rainBlockWidth() {
+                    var size = layout.square;
+                    var width = size * (view.rainBlockWidth / 100);
+                    if (width < 1) width = 1;
+                    if (width > size * 4) width = size * 4;
+                    return width;
+                }
+
+                /* Rain scales with the square so resizing keeps the look; the height
+                   settings are expressed against a 56px square. */
+                function rainBarLength() {
+                    var length = view.rainBarLength * (layout.square / 56);
+                    return length < 1 ? 1 : length;
+                }
+
+                function rainBlockHeight() {
+                    var height = view.rainBlockHeight * (layout.square / 56);
+                    return height < 1 ? 1 : height;
+                }
+
+                function newBar(keyIndex) {
+                    rain.push({
+                        key: keyIndex,
+                        yBottom: 0,
+                        height: 0,
+                        growing: true,
+                        fade: 1
+                    });
+                }
+
+                function newBlock(keyIndex) {
+                    rain.push({
+                        key: keyIndex,
+                        yBottom: 0,
+                        height: rainBlockHeight(),
+                        growing: false,
+                        fade: 1
+                    });
+                }
+
+                /* the bar a held key is currently filling, if any */
+                function activeTail(keyIndex) {
+                    for (var i = rain.length - 1; i >= 0; i--) {
+                        if (rain[i].key === keyIndex && rain[i].growing) return rain[i];
+                    }
+                    return null;
+                }
+
+                function updateRain(dt) {
+                    var speed = view.rainFlowSpeed;
+                    var maxLength = rainBarLength();
+                    var fadeStart = layout.fadeY;
+                    var minAlpha = view.rainMinAlpha / 100;
+                    var i;
+                    var piece;
+
+                    /* ---------- 1. bars grow while their key is held ---------- */
+                    if (view.rainMode === 'bar') {
+                        for (i = 0; i < keys.length; i++) {
+                            if (!keys[i].pressed) continue;
+
+                            var tail = activeTail(i);
+                            if (!tail) {
+                                /* born flush with the square edge at height 0, the
+                                   same way KeyViewer's GetInitialSize() does it */
+                                newBar(i);
+                                /* no `continue` here: the bar must also grow on the
+                                   frame it was created, otherwise it is still zero
+                                   height when the cull below looks at it */
+                                tail = activeTail(i);
+                            }
+
+                            if (tail && tail.height < maxLength) {
+                                tail.height += speed * dt;
+                                if (tail.height > maxLength) tail.height = maxLength;
+                            }
+                        }
+                    }
+
+                    /* ---------- 2. released bars stop growing ---------- */
+                    for (i = 0; i < rain.length; i++) {
+                        piece = rain[i];
+                        if (!piece.growing) continue;
+
+                        var owner = keys[piece.key];
+                        if (owner && owner.pressed) continue;
+
+                        piece.growing = false;
+                        /* a tap shorter than one frame still owes a visible sliver,
+                           because the square itself lit up for that press */
+                        if (piece.height < 1) piece.height = 1;
+                    }
+
+                    /* ---------- 3. drift, fade, cull ---------- */
+                    var alive = 0;
+                    var limit = rain.length;
+
+                    for (i = 0; i < limit; i++) {
+                        piece = rain[i];
+
+                        if (!piece.growing) piece.yBottom += speed * dt;
+
+                        /* Opacity: fully opaque right at the square, then fading as
+                           the bar drifts toward the top of the rain area.
+
+                           Fade is driven by the bar's BOTTOM, not its head. Using the
+                           head made opacity depend on how long the key was held: a
+                           long bar was born with its head already high up, so it
+                           started part-faded or even invisible and seemed to vanish
+                           the moment it was released, while a short bar from a quick
+                           tap stayed solid. The bar's travel distance is what should
+                           decide this.
+
+                           rainFadePosition is how far BELOW the top the fade
+                           finishes, as a percentage of the rain area, so it keeps
+                           working when the overlay is resized. */
+                        var fadeDistance =
+                            fadeStart > 0 ? fadeStart : layout.rainHeight * 0.1;
+                        var travelled = piece.yBottom - layout.rainHeight + fadeDistance;
+                        var factor =
+                            fadeDistance > 0 ? 1 - travelled / fadeDistance : 1;
+                        if (factor < 0) factor = 0;
+                        if (factor > 1) factor = 1;
+                        piece.fade = minAlpha + (1 - minAlpha) * factor;
+
+                        /* A growing bar sits ON the square and may legitimately be
+                           zero height on its first frame, so it is never culled. A
+                           drifting piece is recycled once its top edge has passed the
+                           top of the canvas: yBottom is the distance from the square,
+                           so that is yBottom > rainHeight + height. */
+                        if (
+                            !piece.growing &&
+                            piece.yBottom > layout.rainHeight + piece.height
+                        ) {
+                            continue;
+                        }
+
+                        rain[alive++] = piece;
+                    }
+
+                    rain.length = alive;
+
+                    /* ---------- 4. blocks mode: spawn discrete pieces ---------- */
+                    if (view.rainMode === 'blocks') {
+                        var blockHeight = rainBlockHeight();
+                        var spacing = blockHeight + view.rainBarGap;
+
+                        for (i = 0; i < keys.length; i++) {
+                            if (!keys[i].pressed) continue;
+
+                            var last = null;
+                            for (var b = rain.length - 1; b >= 0; b--) {
+                                if (rain[b].key === i) {
+                                    last = rain[b];
+                                    break;
+                                }
+                            }
+
+                            if (!last) {
+                                newBlock(i);
+                            } else if (last.yBottom >= spacing) {
+                                newBlock(i);
+                            }
+                        }
+                    }
+                }
+function roundedRect(ctx, x, y, w, h, r) {
+                    if (r > w / 2) r = w / 2;
+                    if (r > h / 2) r = h / 2;
+                    if (!(r > 0)) {
+                        ctx.beginPath();
+                        ctx.rect(x, y, w, h);
+                        return;
+                    }
+
+                    ctx.beginPath();
+                    ctx.moveTo(x + r, y);
+                    ctx.lineTo(x + w - r, y);
+                    ctx.arcTo(x + w, y, x + w, y + r, r);
+                    ctx.lineTo(x + w, y + h - r);
+                    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+                    ctx.lineTo(x + r, y + h);
+                    ctx.arcTo(x, y + h, x, y + h - r, r);
+                    ctx.lineTo(x, y + r);
+                    ctx.arcTo(x, y, x + r, y, r);
+                    ctx.closePath();
+                }
+
+                function drawRain() {
+                    rainCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+
+                    if (!rain.length || view.rainOpacity <= 0) return;
+
+                    var rgb = parseColor(view.rainColor);
+                    var alpha = view.rainOpacity / 100;
+                    var width = rainBlockWidth();
+                    var radius = (view.rainRoundness / 100) * Math.min(width / 2, 40);
+
+                    var rowLeft = (canvasWidth - layout.rowWidth) / 2;
+                    var step = layout.square + layout.gap;
+
+                    for (var i = 0; i < rain.length; i++) {
+                        var block = rain[i];
+                        var opacity = alpha * block.fade;
+                        if (!(opacity > 0.004)) continue;
+                        if (!(block.height > 0)) continue;
+
+                        var centerX = rowLeft + step * block.key + layout.square / 2;
+                        var x = centerX - width / 2;
+                        var y = layout.rainHeight - block.yBottom - block.height;
+
+                        /* KeyViewer clips its rain to a mask that starts at the key
+                           edge, so nothing is ever drawn on top of the squares */
+                        if (y + block.height < 0 || y > layout.rainHeight) continue;
+
+                        var drawHeight = block.height;
+                        if (y < 0) {
+                            drawHeight += y;
+                            y = 0;
+                        }
+                        if (y + drawHeight > layout.rainHeight) {
+                            drawHeight = layout.rainHeight - y;
+                        }
+                        if (!(drawHeight > 0)) continue;
+
+                        rainCtx.fillStyle = cssColor(rgb, Math.min(1, opacity));
+                        roundedRect(rainCtx, x, y, width, drawHeight, radius);
+                        rainCtx.fill();
+                    }
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 7. Frame loop (independent of the DOM update loop, so key rain keeps
+                 *    flowing even while the window is being resized)
+                 * ------------------------------------------------------------------ */
+
+                function loop(now) {
+                    rafId = requestAnimationFrame(loop);
+
+                    var dt = 0;
+                    var rawMs = 0;
+                    if (lastFrame) {
+                        rawMs = now - lastFrame;
+                        dt = rawMs / 1000;
+                    }
+                    lastFrame = now;
+
+                    /* Sample the RAW interval, before the clamp below. Reading the
+                       clamped value would report every stall longer than 250ms as
+                       exactly 250ms, which is precisely the number that matters when
+                       diagnosing judder. Sampled before the early return too, so a
+                       host that throttles the loop itself is still visible. */
+                    if (isDebug()) noteFrameInterval(rawMs);
+
+                    if (dt < 0) dt = 0;
+                    if (dt > 0.25) dt = 0.25;
+
+                    /* Hidden because no map is being played. Nothing is drawn and
+                       nothing advances, so the overlay costs almost no CPU while it
+                       is out of the way - it must not compete with other overlays for
+                       frames. Key state is still tracked; the rain just waits.
+
+                       The loop may stop being called entirely in some hosts, so never
+                       leave tracked work pending without a way to run it. */
+                    if (view.showDuringPlay === true && !isPlaying) {
+                        if (frameQueued || needsRebuild) runFrameUpdate();
+                        /* keep the pacing meter readable in this state too - it is
+                           exactly where someone checks whether the overlay is being
+                           throttled while "hidden" */
+                        if (isDebug() && debugEl && ++debugFrames % 10 === 0) {
+                            try {
+                                updateDebugText();
+                            } catch (error) {
+                                /* the readout must never break the loop */
+                            }
+                        }
+                        return;
+                    }
+
+                    /* The rain must never stop because of a diagnostic. A throwing
+                       debug readout would otherwise break every frame while
+                       ?debug=1 is on, which looks exactly like "the rain is broken". */
+                    try {
+                        var hadRain = rain.length > 0;
+                        updateRain(dt);
+                        if (hadRain && !rain.length) {
+                            /* the last piece just went away: clear the canvas once */
+                            rainNeedsRedraw = true;
+                        }
+                        /* while anything is on screen the picture changes every
+                           frame; once it is empty, the canvas stays clean */
+                        if (rain.length || rainNeedsRedraw) {
+                            drawRain();
+                            rainNeedsRedraw = false;
+                        }
+                    } catch (error) {
+                        if (!loopErrorReported) {
+                            loopErrorReported = true;
+                            lastSettingsError = 'rain: ' + ((error && error.message) || error);
+                            log('rain loop error', lastSettingsError);
+                        }
+                    }
+
+                    if (isDebug() && debugEl) {
+                        debugFrames++;
+                        /* 10 frames is frequent enough to watch the meter settle
+                           while still keeping the DOM write off most frames */
+                        if (debugFrames % 10 === 0) {
+                            try {
+                                updateDebugText();
+                            } catch (error) {
+                                debugEl.textContent =
+                                    'debug readout failed: ' +
+                                    ((error && error.message) || error);
+                            }
+                        }
+                    }
+                }
+
+                function updateDebugText() {
+                    if (!debugEl) return;
+                    var pressed = [];
+                    for (var i = 0; i < keys.length; i++) {
+                        if (keys[i].pressed) {
+                            pressed.push(
+                                keys[i].code ||
+                                    (keys[i].gameSlot ? keys[i].gameSlot.toUpperCase() : null) ||
+                                    keys[i].display ||
+                                    '?'
+                            );
+                        }
+                    }
+                    debugEl.textContent =
+                        framePacingText() +
+                        '\ninput=' +
+                        activeSource +
+                        '(kbd ' +
+                        (keyboardSeen ? 'yes' : 'no') +
+                        ', ws ' +
+                        (gameSocket && gameSocket.readyState === 1 ? 'open' : 'closed') +
+                        ', msgs ' +
+                        gameSocketMessages +
+                        ')' +
+                        ' tosu.keys=[' +
+                        lastGameKeys +
+                        '] ' +
+                        lastGamePayload +
+                        ' show=' +
+                        (view.showInputStatus === true ? 'on' : 'off') +
+                        ' keys=' +
+                        keys.length +
+                        ' size=' +
+                        layout.square.toFixed(1) +
+                        ' area=' +
+                        canvasWidth +
+                        'x' +
+                        canvasHeight.toFixed(0) +
+                        ' fadeY=' +
+                        layout.fadeY.toFixed(1) +
+                        ' drops=' +
+                        rain.length +
+                        ' settings=' +
+                        (lastSettingsError ? 'ERR ' + lastSettingsError : settingsSource) +
+                        ' url=' +
+                        lastSettingsUrl +
+                        ' cfg=' +
+                        (readUrlOverride() ? 'yes' : 'no') +
+                        ' pressed=[' +
+                        pressed.join(',') +
+                        ']';
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 8. Live updates = the whole point of the resize requirement
+                 * ------------------------------------------------------------------ */
+
+                var resizeObserver = null;
+
+                function handleResize() {
+                    /* canvas math depends on the host box, rebuild it right away so
+                       the next animation frame already uses correct metrics */
+                    computeLayout();
+                    resizeCanvas();
+                    applyStyles();
+                }
+
+                function watchResize() {
+                    if (typeof ResizeObserver === 'function') {
+                        resizeObserver = new ResizeObserver(handleResize);
+                        resizeObserver.observe(hostEl);
+                    }
+
+                    window.addEventListener('resize', handleResize);
+
+                    /* OBS browser sources sometimes only report a device pixel
+                       ratio change, which no resize event covers */
+                    if (window.matchMedia) {
+                        var query = window.matchMedia(
+                            '(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)'
+                        );
+                        if (query.addEventListener) {
+                            query.addEventListener('change', handleResize);
+                        }
+                    }
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 9. Input
+                 *
+                 * There are two independent sources, because neither one works
+                 * everywhere (this is the thing that makes a key overlay "do
+                 * nothing" in OBS):
+                 *
+                 *   keyboard - the overlay listens to its own keydown/keyup. Works
+                 *              for ANY key, but only while the overlay page actually
+                 *              owns the keyboard focus. OBS browser sources usually
+                 *              do not (they are click-through, and a global hotkey
+                 *              forwards to OBS, not to the source), which is exactly
+                 *              the "no reaction at all" symptom.
+                 *
+                 *   game     - the real tosu data stream: connect to
+                 *              /websocket/v2/precise and read keys.k1/k2/m1/m2.
+                 *              Works with zero focus, and it is what every working
+                 *              tosu key overlay (e.g. Team-BTMC/key-overlay) uses.
+                 *              Trade-off: tosu only exposes the four keys the game
+                 *              itself counts, so arbitrary keys are impossible here.
+                 *
+                 * `auto` probes once: if no key ever arrives from the keyboard, it
+                 * falls back to the game data so the overlay is never dead.
+                 * ------------------------------------------------------------------ */
+
+                var KEYBOARD_SOURCE = 'keyboard';
+                var GAME_SOURCE = 'game';
+
+                var KEYBOARD_PROBE_MS = 4000;
+                var gamePressed = { k1: false, k2: false, m1: false, m2: false };
+                var activeSource = KEYBOARD_SOURCE;
+                var keyboardSeen = false;
+                var keyboardProbeDone = false;
+                var probeTimer = null;
+                var inputStarted = false;
+                var gameSocket = null;
+                var gameSocketRetry = 0;
+                var gameSocketTimer = null;
+                var gameSocketMessages = 0;
+                var lastGameKeys = 'none';
+                var lastGamePayload = '';
+                var autoSlotsDone = false;
+                var slotPlanConfigured = false;
+                var gameStateName = 'unknown';
+                var isPlaying = false;
+                var rootEl = null;
+                var stateSocket = null;
+                var stateSocketTimer = null;
+                var stateRetry = 0;
+                var statusSquares = [];
+                var statusEl = null;
+
+                /* ---- per-key state, shared by both sources ---- */
+                function setKeyPressed(index, pressed, source) {
+                    var key = keys[index];
+                    if (!key) return false;
+
+                    var slot = key.gameSlot;
+                    var flag = source === GAME_SOURCE ? 'gamePressed' : 'keyboardPressed';
+
+                    if (key[flag] === pressed) return false;
+                    key[flag] = pressed;
+
+                    var next = source === GAME_SOURCE ? key.gamePressed : key.keyboardPressed;
+                    if (key.pressed === next) {
+                        /* the value did not change, but the source that owns it did */
+                        renderKey(index);
+                        return false;
+                    }
+
+                    key.pressed = next;
+                    renderKey(index);
+                    return true;
+                }
+
+                function renderKey(index) {
+                    var key = keys[index];
+                    var square = squares[index];
+                    if (!key || !square) return;
+
+                    square.glow.style.opacity = key.pressed ? '1' : '0';
+
+                    var label = labelFor(key);
+                    if (square.letter.textContent !== label) {
+                        square.letter.textContent = label;
+                        fitKeyLetter(index);
+                    }
+                }
+
+                /* setPressed / releaseAll keep their old signature for the hooks */
+                function setPressed(code, pressed) {
+                    var changed = false;
+                    for (var i = 0; i < keys.length; i++) {
+                        if (keys[i].code && keys[i].code === code) {
+                            if (setKeyPressed(i, pressed, KEYBOARD_SOURCE)) changed = true;
+                        }
+                    }
+                    return changed;
+                }
+
+                function setGamePressed(slot, pressed) {
+                    if (!slot) return false;
+
+                    var changed = false;
+                    for (var i = 0; i < keys.length; i++) {
+                        if (keys[i].gameSlot === slot) {
+                            if (setKeyPressed(i, pressed, GAME_SOURCE)) changed = true;
+                        }
+                    }
+                    return changed;
+                }
+
+                function releaseAll() {
+                    var changed = false;
+                    for (var i = 0; i < keys.length; i++) {
+                        if (keys[i].pressed) {
+                            keys[i].pressed = false;
+                            keys[i].keyboardPressed = false;
+                            keys[i].gamePressed = false;
+                            renderKey(i);
+                            changed = true;
+                        }
+                    }
+                    return changed;
+                }
+
+                function releaseSource(source) {
+                    var flag = source === GAME_SOURCE ? 'gamePressed' : 'keyboardPressed';
+                    var other = source === GAME_SOURCE ? 'keyboardPressed' : 'gamePressed';
+                    for (var i = 0; i < keys.length; i++) {
+                        if (!keys[i][flag]) continue;
+                        keys[i][flag] = false;
+                        if (keys[i].pressed !== keys[i][other]) {
+                            keys[i].pressed = keys[i][other];
+                            renderKey(i);
+                        }
+                    }
+                }
+
+                /* labels may carry the data source, which makes a dead setup obvious */
+                function labelFor(key) {
+                    var text = key.label || (key.gameSlot ? key.gameSlot.toUpperCase() : '');
+                    if (view.showInputStatus !== true) return text;
+                    return key.gameSlot ? text + ' (' + key.gameSlot + ')' : text;
+                }
+
+                function refreshLabels() {
+                    for (var i = 0; i < keys.length; i++) {
+                        var square = squares[i];
+                        if (!square || !keys[i]) continue;
+                        var label = labelFor(keys[i]);
+                        if (square.letter.textContent !== label) {
+                            square.letter.textContent = label;
+                            fitKeyLetter(i);
+                        }
+                    }
+                }
+
+                /* ---- source selection ---- */
+                function setActiveSource(source) {
+                    if (activeSource === source) return;
+                    activeSource = source;
+                    log('input source ->', source);
+                    /* whatever the other source had pressed is irrelevant now */
+                    releaseSource(source === GAME_SOURCE ? KEYBOARD_SOURCE : GAME_SOURCE);
+                    if (source === GAME_SOURCE) connectGameSocket();
+                    updateStatus();
+                    refreshLabels();
+                }
+
+                function probeKeyboard() {
+                    if (keyboardProbeDone) return;
+                    keyboardProbeDone = true;
+
+                    if (view.inputMode !== 'auto') return;
+                    if (keyboardSeen) return;
+
+                    /* no keyboard event reached this page - typical for an OBS
+                       browser source, so lean on the tosu data instead of showing
+                       a key viewer that never reacts */
+                    keyboardProbeDone = false;
+                    setActiveSource(GAME_SOURCE);
+                    keyboardProbeDone = true;
+                    updateStatus();
+                }
+
+                function updateStatus() {
+                    if (!statusEl) return;
+                    var forced =
+                        window.location.search.indexOf('diag=1') !== -1 ||
+                        window.location.search.indexOf('debug=1') !== -1;
+                    if (view.showInputStatus !== true && !forced) {
+                        statusEl.style.display = 'none';
+                        return;
+                    }
+                    statusEl.style.display = 'block';
+
+                    var connected = Boolean(gameSocket && gameSocket.readyState === 1);
+                    var pressed = [];
+                    for (var i = 0; i < keys.length; i++) {
+                        if (keys[i].pressed) {
+                            pressed.push(keys[i].gameSlot || keys[i].display || '?');
+                        }
+                    }
+                    statusEl.textContent =
+                        'kv ' +
+                        activeSource +
+                        ' | ' +
+                        keySocketPath() +
+                        ' ' +
+                        (connected ? 'open' : 'CLOSED') +
+                        ' msgs ' +
+                        gameSocketMessages +
+                        ' | tosu.keys ' +
+                        lastGameKeys +
+                        ' | lit ' +
+                        (pressed.length ? pressed.join(',') : '-') +
+                        ' | state ' +
+                        gameStateName +
+                        (view.showDuringPlay === true
+                            ? isPlaying
+                                ? ' (playing: shown)'
+                                : ' (not playing: hidden)'
+                            : '') +
+                        ' | rain ' +
+                        rain.length +
+                        ' | ' +
+                        stateSocketNote();
+                }
+
+                /* what the "only while playing" switch is actually keyed off */
+                function stateSocketNote() {
+                    if (view.showDuringPlay !== true) return 'state socket off';
+                    if (keySocketPath() === '/websocket/v2') return 'state via key socket';
+                    return (
+                        'state socket ' +
+                        (stateSocket && stateSocket.readyState === 1 ? 'open' : 'CLOSED')
+                    );
+                }
+
+                /* ---- the tosu data streams ----
+                   Two independent streams, because tosu splits them:
+
+                     keys  -> /websocket/v2/precise   the high frequency endpoint the
+                             key counters were always read from. This is the path the
+                             key viewer depends on, so it stays the default.
+                     state -> /websocket/v2           only needed by "show only while
+                             playing", which reads game.state.name. Opened on demand.
+
+                   `数据端点` can point the key stream at the general endpoint instead
+                   (fewer sockets, slightly slower keys) for anyone who prefers that. */
+                function keySocketPath() {
+                    return view.gameSocket === 'general'
+                        ? '/websocket/v2'
+                        : '/websocket/v2/precise';
+                }
+
+                function socketUrl(path) {
+                    var protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+                    var folder = counterFolderName();
+                    return (
+                        protocol +
+                        window.location.host +
+                        path +
+                        '?l=' +
+                        encodeURIComponent(folder || settingsFolderUrl())
+                    );
+                }
+
+                function gameSocketUrl() {
+                    return socketUrl(keySocketPath());
+                }
+
+                function stateSocketUrl() {
+                    return socketUrl('/websocket/v2');
+                }
+
+                /* tosu reports game.state.name as the GameState member name */
+                function applyGameState(status) {
+                    var name = String(status == null ? '' : status)
+                        .trim()
+                        .toLowerCase()
+                        .replace(/[^a-z]/g, '');
+
+                    var changed = name !== gameStateName;
+                    gameStateName = name || 'unknown';
+                    var playing = name === 'play' || name === 'gameplay';
+                    if (playing !== isPlaying) {
+                        isPlaying = playing;
+                        updateVisibility();
+                    }
+
+                    /* the optional companion repair, see repairCompanion() */
+                    if (changed) repairCompanion();
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * Companion repair switch.
+                 *
+                 * The analyser page carries a small self-healing guard (installed by
+                 * tools/add-analyser-guard.js) that re-asserts its own card visibility
+                 * when it sticks. That guard runs inside the analyser's own page, so
+                 * nothing has to reach across frames - it simply reads this setting
+                 * back from tosu's settings API to know whether it should stand down.
+                 * ------------------------------------------------------------------ */
+
+                function repairCompanion() {
+                    /* nothing to push: the guard polls the setting itself. Kept so
+                       the state-change hook reads clearly. */
+                }
+
+                /* "show only while a map is being played" - hidden means the whole
+                   overlay stays invisible so nothing is drawn over the menus */
+                function updateVisibility() {
+                    if (!rootEl) return;
+                    if (!rootEl.style) rootEl.style = {};
+                    var hide = view.showDuringPlay === true && !isPlaying;
+                    rootEl.style.display = hide ? 'none' : 'block';
+                }
+
+                /* One incoming tosu payload. Kept separate from the socket so the
+                   hook and the tests can feed the same shape. */
+                function applyGamePayload(data) {
+                    if (!data) return;
+
+                    /* the general endpoint also reports the game state */
+                    if (data.state && data.state.name !== undefined) {
+                        applyGameState(data.state.name);
+                    }
+
+                    if (!data.keys) return;
+
+                    /* Record exactly what tosu sends. This is the single most
+                       useful diagnostic when a key viewer "does nothing": if the
+                       key names arrive but every isPressed stays false, the data
+                       source is the problem, not the overlay. */
+                    var names = [];
+                    var pressedNames = [];
+                    var name;
+                    for (name in data.keys) {
+                        if (!Object.prototype.hasOwnProperty.call(data.keys, name)) continue;
+                        names.push(name);
+                        if (data.keys[name] && data.keys[name].isPressed) {
+                            pressedNames.push(name);
+                        }
+                    }
+                    lastGameKeys = names.length ? names.join(',') : '(none)';
+                    lastGamePayload =
+                        'down=' + (pressedNames.length ? pressedNames.join(',') : '-');
+
+                    if (view.inputMode === 'keyboard') return;
+
+                    /* If the user did not configure any mapping, follow whatever slot
+                       names tosu actually sends, in order. That way the overlay
+                       displays the real data instead of guessing at k1/k2/m1/m2, and
+                       it cannot silently miss a game that names its counters
+                       differently. */
+                    if (!autoSlotsDone && names.length) {
+                        autoSlotsDone = true;
+                        if (slotPlanConfigured !== true) {
+                            var auto = names.slice(0, keys.length);
+                            for (var a = 0; a < keys.length && a < auto.length; a++) {
+                                if (!keys[a].gameSlot) {
+                                    keys[a].gameSlot = auto[a];
+                                    keys[a].autoSlot = true;
+                                    renderKey(a);
+                                    refreshLabels();
+                                }
+                            }
+                            log('auto mapped game slots', auto.join(','));
+                        }
+                    }
+
+                    for (var m = 0; m < names.length; m++) {
+                        var slotName = names[m];
+                        var slotEntry = data.keys[slotName];
+                        if (!slotEntry) continue;
+                        setGamePressed(slotName, Boolean(slotEntry.isPressed));
+                    }
+
+                    /* data is flowing: if we were still only probing, this is the
+                       moment the overlay has to start trusting it */
+                    if (view.inputMode === 'auto' && !keyboardSeen) {
+                        setActiveSource(GAME_SOURCE);
+                    }
+                }
+
+                function connectGameSocket() {
+                    if (view.inputMode === 'keyboard') return;
+                    if (gameSocket && (gameSocket.readyState === 0 || gameSocket.readyState === 1)) {
+                        return;
+                    }
+                    if (typeof window.WebSocket !== 'function') return;
+
+                    try {
+                        gameSocket = new window.WebSocket(gameSocketUrl());
+                    } catch (error) {
+                        log('game socket failed', error && error.message);
+                        scheduleGameReconnect();
+                        return;
+                    }
+
+                    gameSocket.onopen = function () {
+                        gameSocketRetry = 0;
+                        log('key socket open', keySocketPath());
+                        updateStatus();
+                    };
+
+                    gameSocket.onmessage = function (event) {
+                        var data;
+                        try {
+                            data = JSON.parse(event.data);
+                        } catch (error) {
+                            return;
+                        }
+                        if (!data) return;
+
+                        gameSocketMessages++;
+                        applyGamePayload(data);
+                    };
+
+                    gameSocket.onclose = function () {
+                        gameSocket = null;
+                        releaseSource(GAME_SOURCE);
+                        updateStatus();
+                        scheduleGameReconnect();
+                    };
+
+                    gameSocket.onerror = function () {
+                        /* onclose follows and handles the retry */
+                    };
+                }
+
+                /* The state stream exists only for "show only while playing". It is
+                   skipped when the key stream already carries state (general mode) or
+                   when the switch is off, so no extra connection is opened needlessly. */
+                function needsStateSocket() {
+                    if (view.showDuringPlay !== true) return false;
+                    return keySocketPath() !== '/websocket/v2';
+                }
+
+                function connectStateSocket() {
+                    if (!needsStateSocket()) {
+                        disconnectStateSocket();
+                        return;
+                    }
+                    if (
+                        stateSocket &&
+                        (stateSocket.readyState === 0 || stateSocket.readyState === 1)
+                    ) {
+                        return;
+                    }
+                    if (typeof window.WebSocket !== 'function') return;
+
+                    try {
+                        stateSocket = new window.WebSocket(stateSocketUrl());
+                    } catch (error) {
+                        log('state socket failed', error && error.message);
+                        scheduleStateReconnect();
+                        return;
+                    }
+
+                    stateSocket.onopen = function () {
+                        stateRetry = 0;
+                        log('state socket open');
+                    };
+
+                    stateSocket.onmessage = function (event) {
+                        var data;
+                        try {
+                            data = JSON.parse(event.data);
+                        } catch (error) {
+                            return;
+                        }
+                        if (!data || !data.state || data.state.name === undefined) return;
+                        applyGameState(data.state.name);
+                    };
+
+                    stateSocket.onclose = function () {
+                        stateSocket = null;
+                        scheduleStateReconnect();
+                    };
+
+                    stateSocket.onerror = function () {
+                        /* onclose follows */
+                    };
+                }
+
+                function disconnectStateSocket() {
+                    if (stateSocketTimer) {
+                        clearTimeout(stateSocketTimer);
+                        stateSocketTimer = null;
+                    }
+                    if (stateSocket) {
+                        var socket = stateSocket;
+                        stateSocket = null;
+                        socket.onclose = null;
+                        socket.onmessage = null;
+                        socket.onerror = null;
+                        try {
+                            socket.close();
+                        } catch (error) {
+                            /* ignore */
+                        }
+                    }
+                }
+
+                function scheduleStateReconnect() {
+                    if (!needsStateSocket()) return;
+                    if (stateSocketTimer) return;
+                    stateRetry++;
+                    stateSocketTimer = setTimeout(function () {
+                        stateSocketTimer = null;
+                        connectStateSocket();
+                    }, Math.min(10000, 500 * stateRetry));
+                }
+
+                function scheduleGameReconnect() {
+                    if (view.inputMode === 'keyboard') return;
+                    if (gameSocketTimer) return;
+
+                    gameSocketRetry++;
+                    var delay = Math.min(5000, 400 * gameSocketRetry);
+                    gameSocketTimer = setTimeout(function () {
+                        gameSocketTimer = null;
+                        if (activeSource === GAME_SOURCE || view.inputMode === 'game') {
+                            connectGameSocket();
+                        }
+                    }, delay);
+                }
+
+                function disconnectGameSocket() {
+                    if (gameSocketTimer) {
+                        clearTimeout(gameSocketTimer);
+                        gameSocketTimer = null;
+                    }
+                    if (gameSocket) {
+                        var socket = gameSocket;
+                        gameSocket = null;
+                        socket.onclose = null;
+                        socket.onmessage = null;
+                        socket.onerror = null;
+                        try {
+                            socket.close();
+                        } catch (error) {
+                            /* ignore */
+                        }
+                    }
+                    releaseSource(GAME_SOURCE);
+                    updateStatus();
+                }
+
+                /* ---- keyboard source ---- */
+                function bindInput() {
+                    window.addEventListener(
+                        'keydown',
+                        function (event) {
+                            keyboardSeen = true;
+                            if (view.inputMode === 'game') return;
+                            if (activeSource !== KEYBOARD_SOURCE) setActiveSource(KEYBOARD_SOURCE);
+
+                            var handled = setPressed(event.code, true);
+                            if (handled && event.preventDefault) event.preventDefault();
+                        },
+                        true
+                    );
+
+                    window.addEventListener(
+                        'keyup',
+                        function (event) {
+                            var handled = setPressed(event.code, false);
+                            if (handled && event.preventDefault) event.preventDefault();
+                        },
+                        true
+                    );
+
+                    /* a key held while the overlay or the game takes focus never
+                       sends keyup: drop everything on blur or tab switch */
+                    window.addEventListener('blur', function () {
+                        releaseSource(KEYBOARD_SOURCE);
+                    });
+                    document.addEventListener('visibilitychange', function () {
+                        if (document.hidden) releaseSource(KEYBOARD_SOURCE);
+                    });
+
+                    /* simulate input with ?press=KeyZ,Space for previews and tests */
+                    var params = new URLSearchParams(window.location.search || '');
+                    var pressParam = params.get('press');
+                    if (pressParam) {
+                        var codes = pressParam.split(',');
+                        for (var i = 0; i < codes.length; i++) {
+                            var code = resolveCode(codes[i].trim());
+                            if (code) setPressed(code, true);
+                        }
+                    }
+
+                    /* ?auto=1 lets the fake tosu socket in tools/serve.js drive the
+                       overlay, which is how the data path gets screenshot tested */
+                    if (params.get('auto') === '1' && typeof window.WebSocket === 'function') {
+                        keyboardSeen = true;
+                        keyboardProbeDone = true;
+                    }
+                }
+
+                function startInput() {
+                    if (statusEl) statusEl.style.display = 'none';
+
+                    if (view.inputMode === 'game') {
+                        keyboardProbeDone = true;
+                        setActiveSource(GAME_SOURCE);
+                        connectGameSocket();
+                        updateStatus();
+                        return;
+                    }
+                    /* keyboard mode: never touch the socket */
+                    if (view.inputMode === 'keyboard') {
+                        keyboardProbeDone = true;
+                        disconnectGameSocket();
+                        activeSource = KEYBOARD_SOURCE;
+                        updateStatus();
+                        return;
+                    }
+
+                    /* auto: assume the keyboard works, and hand over to the tosu
+                       data if nothing arrives before the probe expires */
+                    if (!keyboardSeen) {
+                        if (probeTimer) clearTimeout(probeTimer);
+                        probeTimer = setTimeout(probeKeyboard, view.inputProbeMs);
+                    }
+                    updateStatus();
+                }
+
+                /* Safety net: the overlay must never sit idle just because the
+                   settings file was slow or unreachable. If nothing has started the
+                   input machinery a few seconds in, start it with whatever the
+                   current settings (or the built-in defaults) say. */
+                function ensureInputStarted() {
+                    if (inputStarted) return false;
+                    if (settingsSource === 'defaults') {
+                        log('settings.json did not arrive, starting input anyway');
+                    }
+                    startInput();
+                    inputStarted = true;
+                    return true;
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 10. Settings: initial read + polling
+                 * ------------------------------------------------------------------ */
+
+                /* NOTE: no `dashboardValues` parameter here. It used to take one, which
+                   shadowed the module-level set and silently made every call that
+                   omitted the argument read `undefined` - so a settings broadcast
+                   parsed correctly, merged correctly, and then changed nothing. Read
+                   the module-level set directly instead. */
+                function normalize(input) {
+                    var out = {};
+                    var prop;
+
+                    /* Two shapes arrive here:
+                       - settings.json: an ARRAY of setting definitions, whose `value`
+                         fields are the defaults
+                       - <tosu>/settings/<folder>.values.json (and whatever the
+                         Dashboard sends): a plain OBJECT keyed by uniqueID
+                       Both are turned into one flat "source" object first. */
+                    var source = {};
+                    if (Array.isArray(input)) {
+                        for (var i = 0; i < input.length; i++) {
+                            var entry = input[i];
+                            if (!entry || typeof entry !== 'object') continue;
+                            if (entry.value === undefined) continue;
+                            source[entry.uniqueID] = entry.value;
+                        }
+                    } else if (input && typeof input === 'object') {
+                        source = input;
+                    }
+
+                    /* ?config={"keyCount":6,...} in the overlay URL forces values on
+                       top of whatever settings.json says. It is applied here on the
+                       flat source, which:
+                         - keeps an ARRAY settings.json intact (merging onto the raw
+                           array would turn it into an object and drop the defaults)
+                         - lets the URL win even for keys the file also defines */
+                    var override = currentUrlOverride();
+
+                    /* One pass over the known settings. Precedence, highest first:
+                       URL override -> Dashboard values -> what we already had ->
+                       settings.json -> built-in default. Every value is coerced by
+                       type in place, so there is no way for a later pass to silently
+                       overwrite an earlier decision. */
+                    for (prop in DEFAULTS) {
+                        if (!Object.prototype.hasOwnProperty.call(DEFAULTS, prop)) continue;
+
+                        var chosen = DEFAULTS[prop];
+                        var haveValue = false;
+
+                        /* Locked settings are no longer in settings.json, so
+                           nothing in the Dashboard can change them. Any value
+                           left over in an old values file or a stale broadcast
+                           must NOT be read back either, or the value would
+                           silently revert the moment the file is re-read.
+                           An explicit ?config= still wins: the features are all
+                           still implemented and still reachable that way. */
+                        if (
+                            LOCKED_SETTINGS.indexOf(prop) !== -1 &&
+                            !(
+                                override &&
+                                Object.prototype.hasOwnProperty.call(override, prop) &&
+                                override[prop] !== undefined &&
+                                override[prop] !== null
+                            )
+                        ) {
+                            out[prop] = DEFAULTS[prop];
+                            continue;
+                        }
+
+                        /* the previously applied value: the safety layer that stops a
+                           partial Dashboard update from resetting everything else */
+                        if (
+                            lastGoodSettings &&
+                            Object.prototype.hasOwnProperty.call(lastGoodSettings, prop) &&
+                            lastGoodSettings[prop] !== undefined &&
+                            lastGoodSettings[prop] !== null
+                        ) {
+                            chosen = lastGoodSettings[prop];
+                            haveValue = true;
+                        }
+
+                        if (Object.prototype.hasOwnProperty.call(source, prop)) {
+                            var fromSource = source[prop];
+                            if (fromSource !== undefined && fromSource !== null) {
+                                chosen = fromSource;
+                                haveValue = true;
+                            }
+                        }
+
+                        if (
+                            dashboardValues &&
+                            Object.prototype.hasOwnProperty.call(dashboardValues, prop)
+                        ) {
+                            var fromDashboard = dashboardValues[prop];
+                            if (fromDashboard !== undefined && fromDashboard !== null) {
+                                chosen = fromDashboard;
+                                haveValue = true;
+                            }
+                        }
+
+                        if (override && Object.prototype.hasOwnProperty.call(override, prop)) {
+                            var fromUrl = override[prop];
+                            if (fromUrl !== undefined && fromUrl !== null) {
+                                chosen = fromUrl;
+                                haveValue = true;
+                            }
+                        }
+
+                        if (!haveValue) {
+                            out[prop] = DEFAULTS[prop];
+                            continue;
+                        }
+
+                        if (NUMERIC_LIMITS[prop]) {
+                            out[prop] = coerceNumber(prop, chosen, DEFAULTS[prop]);
+                        } else if (BOOLEAN_KEYS.indexOf(prop) !== -1) {
+                            out[prop] = coerceBool(chosen);
+                        } else {
+                            out[prop] = chosen;
+                        }
+                    }
+
+                    if (['bar', 'blocks'].indexOf(out.rainMode) === -1) {
+                        out.rainMode = DEFAULTS.rainMode;
+                    }
+                    if (['auto', 'keyboard', 'game'].indexOf(out.inputMode) === -1) {
+                        out.inputMode = DEFAULTS.inputMode;
+                    }
+                    if (['general', 'precise'].indexOf(out.gameSocket) === -1) {
+                        out.gameSocket = DEFAULTS.gameSocket;
+                    }
+
+                    out.debugStatus = coerceBool(out.debugStatus);
+                    return out;
+                }
+
+                function signatureOf(value) {
+                    return JSON.stringify(value);
+                }
+
+                var currentSignature = null;
+                var settingsLoaded = false;
+                var lastSettingsError = 'not requested';
+                var lastSettingsUrl = '';
+                var settingsSource = 'defaults';
+                var settingsFetchState = 'idle';
+                var settingsFetchCount = 0;
+                var lastInputSignature = null;
+
+                function applySettings(input) {
+                    var next = normalize(input);
+                    var signature = signatureOf(next);
+                    if (signature === currentSignature) return;
+
+                    var previousSlots = settings ? settings.gameSlots : undefined;
+                    var previousDisplay = settings ? settings.displayText : undefined;
+                    currentSignature = signature;
+                    settings = next;
+                    view = next;
+                    settingsLoaded = true;
+                    /* remember the fully resolved set: a later partial Dashboard
+                       update falls back to this instead of the plugin defaults */
+                    lastGoodSettings = next;
+
+                    showDebug =
+                        new URLSearchParams(window.location.search || '').has('debug') ||
+                        next.debugStatus === true;
+                    if (debugEl) {
+                        debugEl.style.display = showDebug ? 'block' : 'none';
+                    }
+
+                    log('settings applied', next);
+                    /* the squares were re-created, so rain belonging to the previous
+                       mapping would keep falling in the wrong column */
+                    if (
+                        rain.length &&
+                        keys.length &&
+                        (previousSlots !== next.gameSlots ||
+                            previousDisplay !== next.displayText)
+                    ) {
+                        resetRain();
+                    }
+
+                    /* an input related change needs the source machinery restarted */
+                    var inputSignature =
+                        next.inputMode +
+                        '|' +
+                        next.gameSlots +
+                        '|' +
+                        next.showInputStatus +
+                        '|' +
+                        next.gameSocket;
+                    var firstApply = lastInputSignature === null;
+                    if (inputSignature !== lastInputSignature) {
+                        lastInputSignature = inputSignature;
+                        keyboardProbeDone = false;
+                        if (probeTimer) {
+                            clearTimeout(probeTimer);
+                            probeTimer = null;
+                        }
+                        releaseAll();
+                        if (next.inputMode === 'keyboard') {
+                            disconnectGameSocket();
+                            setActiveSource(KEYBOARD_SOURCE);
+                        } else if (next.inputMode === 'game') {
+                            setActiveSource(GAME_SOURCE);
+                        } else if (!keyboardSeen) {
+                            setActiveSource(GAME_SOURCE);
+                        } else {
+                            setActiveSource(KEYBOARD_SOURCE);
+                        }
+                        /* input related settings changed: restart the source machinery
+                           with the freshly loaded configuration */
+                        if (!firstApply || !inputStarted) {
+                            startInput();
+                            inputStarted = true;
+                        }
+                    }
+
+                    /* Apply the new look right now, synchronously. Going through the
+                       animation-frame queue was fragile: the page may never paint (OBS
+                       preview, background tab) and an unrelated frame update could
+                       consume the pending rebuild before the new view was in place.
+                       Rebuilding here removes both failure modes. */
+                    needsRebuild = false;
+                    frameQueued = false;
+                    rebuildCount++;
+                    rebuild();
+
+                    /* the "only while playing" switch may have been toggled */
+                    updateVisibility();
+
+                    /* open or close the state stream to match that switch */
+                    connectStateSocket();
+                }
+
+                /* Overlay settings live in <counter folder>/settings.json (this file,
+                   read back for defaults) and in <tosu>/settings/<folder>.values.json
+                   (what the Dashboard writes). The overlay cannot delete the values
+                   file, but it can write an empty object back through the same API the
+                   Dashboard uses, which restores every "default" value. */
+                var RESET_VALUE_KEY = '__reset';
+                var lastResetToken = null;
+                var resetInFlight = false;
+                var settingsSocket = null;
+                var settingsSocketTimer = null;
+                var settingsRetry = 0;
+                /* the last settings.json payload, so a broadcast can be merged
+                   against the same defaults without another HTTP round trip */
+                var lastLoadedJson = null;
+                /* What the Dashboard currently holds. tosu sends this as a full set
+                   (getSettings reply) or as only the changed keys (updateSettings
+                   broadcast), so it lives here and is merged, never replaced by a
+                   partial payload. */
+                var dashboardValues = {};
+                /* true once a COMPLETE set is known (boot read or getSettings
+                   reply). Until then a partial update cannot be applied safely. */
+                var settingsEverAppliedFromDashboard = false;
+                /* the last fully applied setting set: the fallback layer so a partial
+                   update cannot silently reset everything else */
+                var lastGoodSettings = null;
+
+                function settingsFolderUrl() {
+                    var path = window.location.pathname || '/';
+                    if (path.charAt(path.length - 1) === '/') {
+                        return path;
+                    }
+                    var slash = path.lastIndexOf('/');
+                    if (slash === -1) return '/';
+                    return path.slice(0, slash + 1);
+                }
+
+                /* The counter folder name, which is how tosu identifies this overlay
+                   on its settings channel. Both URL forms must work:
+                     /keyviewer_awa/             (the usual OBS URL)
+                     /keyviewer_awa/index.html   (explicit file, dashboard preview) */
+                function counterFolderName() {
+                    var path = window.location.pathname || '';
+                    var parts = path.split('/').filter(function (part) {
+                        return part !== '';
+                    });
+
+                    for (var i = parts.length - 1; i >= 0; i--) {
+                        var part = parts[i];
+                        if (/\.html?$/i.test(part)) continue;
+                        return decodeURIComponent(part);
+                    }
+                    return '';
+                }
+
+                function readResetToken(json) {
+                    if (!json) return null;
+                    if (json.resetSettings === true || json.resetSettings === 'true') {
+                        return 'plain';
+                    }
+                    var token = json.resetSettings;
+                    if (typeof token === 'string' && token.trim()) return token.trim();
+                    return null;
+                }
+
+                function clearStoredValues() {
+                    var folder = counterFolderName();
+                    if (!folder || resetInFlight) return;
+
+                    resetInFlight = true;
+                    fetch('/api/counters/settings/' + encodeURIComponent(folder), {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify([
+                            { uniqueID: RESET_VALUE_KEY, value: '' }
+                        ])
+                    })
+                        .then(function (response) {
+                            return response.json();
+                        })
+                        .then(function (result) {
+                            log('settings reset', result);
+                        })
+                        .catch(function (error) {
+                            log('settings reset failed', error && error.message);
+                        })
+                        .then(function () {
+                            resetInFlight = false;
+                        });
+                }
+
+                function installErrorTrap() {
+                    window.addEventListener('error', function (event) {
+                        lastSettingsError = 'js: ' + (event.message || 'error');
+                        log('window error', event.message);
+                    });
+                    window.addEventListener('unhandledrejection', function (event) {
+                        var reason = event && event.reason;
+                        lastSettingsError =
+                            'promise: ' + ((reason && reason.message) || reason);
+                        log('unhandled rejection', lastSettingsError);
+                    });
+                }
+
+                /* The Dashboard does NOT rewrite this folder's settings.json. It saves
+                   what the user entered into <tosu>/settings/<folder>.values.json and
+                   exposes it through /api/counters/settings/<folder> as
+                   { settings: [...definitions], values: {...saved values} }.
+
+                   Reading that endpoint on a timer is what used to flood the tosu log
+                   with "Settings accessed" lines and add constant work to the server,
+                   which is also what slowed other overlays down until they missed
+                   game-state changes. Instead the overlay joins tosu's own settings
+                   broadcast:
+
+                     - sends   getSettings:<folder>       on /websocket/commands
+                     - tosu    replies with the saved values
+                     - on every Dashboard save, tosu emits
+                       "save settings" to the same channel, and we re-read once
+
+                   So settings are read at boot and whenever they actually change -
+                   never on a timer. */
+
+                function settingsChannelUrl() {
+                    var protocol = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+                    var path = settingsFolderUrl();
+                    var folder = counterFolderName();
+                    return (
+                        protocol +
+                        window.location.host +
+                        '/websocket/commands?l=' +
+                        encodeURIComponent(folder || path)
+                    );
+                }
+
+                /* tosu broadcasts the save on the commands channel as
+                   "updateSettings" with only the changed keys, so a plain text
+                   notice is no longer needed. Kept for the getSettings reply path. */
+                function isOwnSaveNotice(raw) {
+                    return raw.indexOf('saveSettings') === 0 || raw.indexOf('save settings') === 0;
+                }
+
+                /* Ask tosu for the complete saved setting set. */
+                function requestSettings() {
+                    if (!settingsSocket || settingsSocket.readyState !== 1) return;
+                    try {
+                        settingsSocket.send(
+                            'getSettings:' + encodeURIComponent(counterFolderName())
+                        );
+                    } catch (error) {
+                        log('getSettings failed', error && error.message);
+                    }
+                }
+
+                function connectSettingsSocket() {
+                    if (typeof window.WebSocket !== 'function') return;
+
+                    try {
+                        settingsSocket = new window.WebSocket(settingsChannelUrl());
+                    } catch (error) {
+                        log('settings socket failed', error && error.message);
+                        scheduleSettingsReconnect();
+                        return;
+                    }
+
+                    settingsSocket.onopen = function () {
+                        settingsRetry = 0;
+                        requestSettings();
+                    };
+
+                    settingsSocket.onmessage = function (event) {
+                        var raw = String(event.data || '');
+
+                        var data;
+                        try {
+                            data = JSON.parse(raw);
+                        } catch (error) {
+                            data = null;
+                        }
+
+                        if (data) {
+                            /* tosu replies to getSettings with the complete saved set */
+                            if (data.command === 'getSettings') {
+                                if (!data.message || data.message.error) return;
+                                if (
+                                    typeof data.message !== 'object' ||
+                                    Array.isArray(data.message)
+                                ) {
+                                    return;
+                                }
+
+                                dashboardValues = data.message;
+                                if (Object.keys(dashboardValues).length === 0) return;
+
+                                settingsEverAppliedFromDashboard = true;
+                                settingsSource =
+                                    'tosu values(' +
+                                    Object.keys(dashboardValues).length +
+                                    ')';
+                                applySettings(lastLoadedJson);
+                                return;
+                            }
+
+                            /* after a Dashboard save tosu broadcasts ONLY the keys
+                               that changed. They have to be merged into what we
+                               already know, otherwise every other setting falls back
+                               to the plugin defaults. */
+                            if (data.command === 'updateSettings') {
+                                var changed = parseChangedValues(data.message);
+                                if (!changed) return;
+
+                                /* A partial update is only safe on top of a complete
+                                   set. If none is known yet, ask for the full one. */
+                                if (!settingsEverAppliedFromDashboard) {
+                                    requestSettings();
+                                    return;
+                                }
+
+                                mergeInto(dashboardValues, changed);
+                                settingsSource =
+                                    'tosu update(' + Object.keys(changed).length + ')';
+                                applySettings(lastLoadedJson);
+                                return;
+                            }
+                        }
+
+                        /* the plain-text fallbacks (older/other tosu builds) */
+                        if (raw.indexOf('saveSettings') === 0 || raw.indexOf('save settings') === 0) {
+                            loadSettingsOnce();
+                            return;
+                        }
+
+                        log('settings channel message', raw.slice(0, 200));
+                    };
+
+                    settingsSocket.onclose = function () {
+                        settingsSocket = null;
+                        scheduleSettingsReconnect();
+                    };
+
+                    settingsSocket.onerror = function () {
+                        /* onclose follows */
+                    };
+                }
+
+                /* updateSettings carries [{uniqueID, value}, ...] */
+                function parseChangedValues(message) {
+                    if (!message) return null;
+
+                    var list = Array.isArray(message) ? message : null;
+                    if (!list && typeof message === 'string') {
+                        try {
+                            var parsed = JSON.parse(message);
+                            list = Array.isArray(parsed) ? parsed : null;
+                        } catch (error) {
+                            return null;
+                        }
+                    }
+                    if (!list) return null;
+
+                    var out = {};
+                    var count = 0;
+                    for (var i = 0; i < list.length; i++) {
+                        var entry = list[i];
+                        if (!entry || typeof entry !== 'object') continue;
+                        var id = String(entry.uniqueID || '').replace(/[^a-z0-9]/gim, '');
+                        if (!id) continue;
+                        out[id] = entry.value;
+                        count++;
+                    }
+                    return count ? out : null;
+                }
+
+                /* Shallow merge. Never hand a partial set to applySettings on its
+                   own: normalize() falls back to settings.json for anything it
+                   cannot see, which would revert every untouched setting. */
+                function mergeInto(target, source) {
+                    if (!source) return target;
+                    Object.keys(source).forEach(function (key) {
+                        target[key] = source[key];
+                    });
+                    return target;
+                }
+
+                function scheduleSettingsReconnect() {
+                    if (settingsSocketTimer) return;
+                    settingsRetry++;
+                    settingsSocketTimer = setTimeout(function () {
+                        settingsSocketTimer = null;
+                        connectSettingsSocket();
+                    }, Math.min(10000, 500 * settingsRetry));
+                }
+
+                function settingsApiUrl() {
+                    return '/api/counters/settings/' + encodeURIComponent(counterFolderName());
+                }
+
+                function fetchDashboardSettings() {
+                    return fetch(settingsApiUrl(), { cache: 'no-store' }).then(
+                        function (response) {
+                            if (!response.ok) throw new Error('HTTP ' + response.status);
+                            return response.json();
+                        }
+                    );
+                }
+
+                function hasDashboardValues(payload) {
+                    if (!payload || payload.error) return false;
+                    if (!Array.isArray(payload.settings)) return false;
+                    var values = payload.values;
+                    if (!values || typeof values !== 'object' || Array.isArray(values)) {
+                        return false;
+                    }
+                    return Object.keys(values).length > 0;
+                }
+
+                function loadSettingsOnce() {
+                    var reloadUrl = settingsFolderUrl() + 'settings.json';
+                    var url = reloadUrl + '?t=' + Date.now();
+                    lastSettingsUrl = url;
+                    settingsFetchState = 'started#' + (++settingsFetchCount);
+
+                    function retryWithConcreteUrl() {
+                        /* serving a folder URL can behave differently across hosts;
+                           settings.json is a sibling of index.html in both cases, but
+                           fall back to the resolved URL once just to be safe */
+                        var absolute = new URL('settings.json', window.location.href);
+                        absolute.searchParams.set('t', String(Date.now()));
+                        lastSettingsUrl = absolute.pathname + absolute.search;
+
+                        return fetch(absolute.toString(), { cache: 'no-store' }).then(
+                            function (response) {
+                                if (!response.ok) throw new Error('HTTP ' + response.status);
+                                return response.json();
+                            }
+                        );
+                    }
+
+                    /* settings.json holds the plugin's own defaults, while the tosu API
+                       holds whatever the user saved in the Dashboard. Values win. */
+                    return fetch(url, { cache: 'no-store' })
+                        .then(function (response) {
+                            if (!response.ok) throw new Error('HTTP ' + response.status);
+                            return response.json();
+                        })
+                        .catch(function (error) {
+                            log('settings.json retry after', error && error.message);
+                            return retryWithConcreteUrl();
+                        })
+                        .then(function (json) {
+                            /* record that the file arrived BEFORE touching anything
+                               else, so a later exception cannot look like "no
+                               settings" and silently force the defaults */
+                            lastSettingsError = '';
+                            settingsSource = Array.isArray(json)
+                                ? 'array(' + json.length + ')'
+                                : 'object(' +
+                                  (json && typeof json === 'object'
+                                      ? Object.keys(json).length
+                                      : typeof json) +
+                                  ')';
+
+                            var token = readResetToken(json);
+                            if (token && token !== lastResetToken) {
+                                lastResetToken = token;
+                                clearStoredValues();
+                            } else if (token) {
+                                lastResetToken = token;
+                            } else {
+                                lastResetToken = null;
+                            }
+
+                            return fetchDashboardSettings()
+                                .then(function (payload) {
+                                    lastLoadedJson = json;
+                                    if (hasDashboardValues(payload)) {
+                                        /* Merge backwards: anything a broadcast has
+                                           already delivered is NEWER than this
+                                           snapshot, so it must not be rolled back by
+                                           a slow boot-time read. */
+                                        if (!settingsEverAppliedFromDashboard) {
+                                            mergeInto(dashboardValues, payload.values);
+                                        }
+                                        settingsEverAppliedFromDashboard = true;
+                                        settingsSource =
+                                            'tosu values(' +
+                                            Object.keys(payload.values).length +
+                                            ') + ' +
+                                            settingsSource;
+                                    }
+                                    applySettings(json);
+                                })
+                                .catch(function (error) {
+                                    /* bare preview server or file access: the plugin's
+                                       own defaults file is still enough */
+                                    log(
+                                        'dashboard settings API unavailable',
+                                        error && error.message
+                                    );
+                                    lastLoadedJson = json;
+                                    applySettings(json);
+                                });
+                        })
+                        .then(function () {
+                            settingsFetchState = 'applied#' + ++settingsFetchCount;
+                            return true;
+                        })
+                        .catch(function (error) {
+                            lastSettingsError =
+                                'fetch: ' + ((error && error.message) || 'unknown error');
+                            settingsFetchState = 'failed#' + ++settingsFetchCount;
+                            log('settings.json fetch failed', lastSettingsError);
+                            if (!settingsLoaded) applySettings({});
+                            return false;
+                        });
+                }
+
+                /* ?config={"rainMode":"blocks",...} on the overlay URL forces
+                   specific values, which keeps previews and automated tests
+                   deterministic - and is the supported way to reach the
+                   behaviours whose Dashboard options were removed. */
+                function readUrlOverride() {
+                    var params = new URLSearchParams(window.location.search || '');
+                    var raw = params.get('config');
+                    if (!raw) return null;
+
+                    try {
+                        var override = JSON.parse(raw);
+                        if (!override || typeof override !== 'object') return null;
+                        if (Array.isArray(override)) return null;
+                        return override;
+                    } catch (error) {
+                        log('bad ?config payload', error && error.message);
+                        return null;
+                    }
+                }
+
+                var urlOverrideInjected = null;
+
+                function currentUrlOverride() {
+                    var fromUrl = readUrlOverride();
+                    if (fromUrl) return fromUrl;
+                    return urlOverrideInjected;
+                }
+
+                /* ------------------------------------------------------------------ *
+                 * 11. Boot
+                 * ------------------------------------------------------------------ */
+                function boot() {
+                    hostEl = document.getElementById('overlay_host');
+                    rainCanvas = document.getElementById('rain_canvas');
+                    squaresEl = document.getElementById('key_squares');
+
+                    if (!hostEl || !rainCanvas || !squaresEl || !rainCanvas.getContext) {
+                        return;
+                    }
+
+                    rootEl = hostEl;
+                    rainCtx = rainCanvas.getContext('2d');
+
+                    /* a detached canvas is used purely to measure label widths */
+                    try {
+                        var measureCanvas = document.createElement('canvas');
+                        measureCtx = measureCanvas.getContext('2d');
+                    } catch (error) {
+                        measureCtx = rainCtx;
+                    }
+
+                    if (new URLSearchParams(window.location.search || '').has('debug')) {
+                        debugEl = document.createElement('div');
+                        debugEl.style.cssText =
+                            'position:fixed;left:4px;top:4px;z-index:9;padding:2px 6px;' +
+                            'font:11px/1.4 Consolas,monospace;color:#0f0;' +
+                            'background:rgba(0,0,0,.55);border-radius:4px;pointer-events:none';
+                        document.body.appendChild(debugEl);
+                    }
+
+                    /* the input-source badge: this is what tells the user why a
+                       setup shows nothing when they press a key */
+                    statusEl = document.createElement('div');
+                    statusEl.style.cssText =
+                        'position:fixed;left:0;bottom:0;z-index:9;padding:1px 5px;' +
+                        'font:10px/1.5 Consolas,monospace;color:#0ff;' +
+                        'background:rgba(0,0,0,.55);border-radius:3px;pointer-events:none;' +
+                        'display:none';
+                    document.body.appendChild(statusEl);
+
+                    view = normalize({});
+                    settings = view;
+
+                    buildKeys();
+                    computeLayout();
+                    resizeCanvas();
+                    applyStyles();
+                    watchResize();
+                    bindInput();
+                    installErrorTrap();
+                    /* The input machinery is started from applySettings once the real
+                       configuration has been read, so the keyboard-detection window
+                       never runs against hardcoded defaults. This is only a safety
+                       net for the case where settings.json cannot be read at all. */
+                    setTimeout(ensureInputStarted, 2500);
+
+                    loadSettingsOnce();
+                    connectSettingsSocket();
+
+                    lastFrame = 0;
+                    rafId = requestAnimationFrame(loop);
+
+                    /* expose a tiny hook so a preview page or an automated test can
+                       drive the overlay without a real keyboard */
+                    window.keyviewer = {
+                        press: function (code) {
+                            var resolved = resolveCode(code);
+                            if (resolved) setPressed(resolved, true);
+                            return resolved;
+                        },
+                        release: function (code) {
+                            var resolved = resolveCode(code);
+                            if (resolved) setPressed(resolved, false);
+                            return resolved;
+                        },
+                        releaseAll: releaseAll,
+                        applySettings: applySettings,
+                        /* Feeds settings the way the Dashboard does, so a test
+                           exercises the real path instead of poking locals.
+                             setDashboardValues(partial) -> merge + apply, exactly like
+                             the updateSettings broadcast
+                             setDashboardValues(full, true) -> replace, exactly like the
+                             getSettings reply */
+                        setDashboardValues: function (values, replace) {
+                            if (!values) return;
+                            if (replace) {
+                                dashboardValues = values;
+                                settingsEverAppliedFromDashboard = true;
+                            } else {
+                                mergeInto(dashboardValues, values);
+                            }
+                            settingsSource = replace
+                                ? 'tosu values(' + Object.keys(dashboardValues).length + ')'
+                                : 'tosu update(' + Object.keys(values).length + ')';
+                            applySettings(lastLoadedJson);
+                        },
+                        /* Deterministic driver for tests and previews: advances the
+                           rain by an exact amount and repaints. Headless browsers
+                           throttle requestAnimationFrame, so without this there is
+                           no way to assert on rain motion. */
+                        step: function (seconds) {
+                            var total = typeof seconds === 'number' ? seconds : 1 / 60;
+                            var slice = 1 / 120;
+                            if (total < slice) slice = total;
+                            for (var elapsed = 0; elapsed < total; elapsed += slice) {
+                                updateRain(Math.min(slice, total - elapsed));
+                            }
+                            drawRain();
+                            if (debugEl) updateDebugText();
+                            return rain.length;
+                        },
+                        /* why the rain is (not) moving - for tests and support */
+                        debugRain: function () {
+                            var pressed = [];
+                            for (var i = 0; i < keys.length; i++) {
+                                pressed.push(
+                                    (keys[i].code || '?') + '=' + (keys[i].pressed ? '1' : '0')
+                                );
+                            }
+                            return {
+                                rainMode: view.rainMode,
+                                speed: view.rainFlowSpeed,
+                                barLength: rainBarLength(),
+                                rainHeight: layout.rainHeight,
+                                square: layout.square,
+                                keys: pressed.join(' '),
+                                pieces: rain.length
+                            };
+                        },
+                        /* internal piece list, so a test can assert on geometry */
+                        rainState: function () {
+                            return rain.map(function (piece) {
+                                return {
+                                    key: piece.key,
+                                    yBottom: piece.yBottom,
+                                    height: piece.height,
+                                    growing: piece.growing,
+                                    fade: piece.fade
+                                };
+                            });
+                        },
+                        /* drives the game-data source without osu!/tosu running */
+                        setGamePressed: setGamePressed,
+                        /* feeds a tosu /websocket/v2 style payload */
+                        applyGamePayload: function (payload) {
+                            applyGamePayload(payload);
+                            return { state: gameStateName, playing: isPlaying };
+                        },
+                        visibility: function () {
+                            return {
+                                state: gameStateName,
+                                playing: isPlaying,
+                                hidden: Boolean(rootEl && rootEl.style.display === 'none'),
+                                settingsSocketOpen: Boolean(
+                                    settingsSocket && settingsSocket.readyState === 1
+                                ),
+                                stateSocketOpen: Boolean(
+                                    stateSocket && stateSocket.readyState === 1
+                                ),
+                                /* the optional companion repair */
+                                companionSwitch: view.fixAnalyserOnStateChange === true,
+                                gameStateName: gameStateName
+                            };
+                        },
+                        source: function () {
+                            return {
+                                active: activeSource,
+                                keyboardSeen: keyboardSeen,
+                                probeDone: keyboardProbeDone,
+                                probeMs: view.inputProbeMs,
+                                inputMode: view.inputMode,
+                                inputStarted: inputStarted,
+                                probePending: Boolean(probeTimer),
+                                socketOpen: Boolean(gameSocket && gameSocket.readyState === 1),
+                                gamePressed: gamePressed
+                            };
+                        },
+                        state: function () {
+                            return {
+                                settings: settings,
+                                settingsSource: settingsSource,
+                                settingsError: lastSettingsError,
+                                settingsUrl: lastSettingsUrl,
+                                settingsFetchState: settingsFetchState,
+                                origin: window.location.href,
+                                activeSource: activeSource,
+                                keyboardSeen: keyboardSeen,
+                                rebuilds: rebuildCount,
+                                socketOpen: Boolean(gameSocket && gameSocket.readyState === 1),
+                                socketMessages: gameSocketMessages,
+                                tosuKeys: lastGameKeys,
+                                tosuPayload: lastGamePayload,
+                                keys: keys.map(function (k) {
+                                    return {
+                                        code: k.code,
+                                        gameSlot: k.gameSlot,
+                                        display: k.display,
+                                        label: k.label,
+                                        pressed: k.pressed
+                                    };
+                                }),
+                                rain: rain.length,
+                                layout: layout
+                            };
+                        }
+                    };
+
+                    log('ready');
+                }
+
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', boot);
+                } else {
+                    boot();
+                }
+
+                /* tiny pure-function surface, used by tests/tools/keys.test.js */
+                window.__keyviewerInternals = {
+                    resolveCode: resolveCode,
+                    resolveDisplay: resolveDisplay,
+                    parseDisplayText: parseDisplayText,
+                    parseGameSlots: parseGameSlots,
+                    codeDefaultLabel: codeDefaultLabel,
+                    parseColor: parseColor,
+                    normalize: normalize,
+                    /* normalize() reads the Dashboard set from module scope, so a
+                       test needs a way to install one */
+                    setDashboardValues: function (values) {
+                        dashboardValues = values || {};
+                        settingsEverAppliedFromDashboard = false;
+                        lastGoodSettings = null;
+                    },
+                    allCodes: ALL_CODES.slice(),
+                    /* the settings that were removed from the Dashboard but are
+                       still implemented and pinned - see LOCKED_SETTINGS */
+                    LOCKED_SETTINGS: LOCKED_SETTINGS.slice(),
+                    DEFAULTS: DEFAULTS,
+                    /* Test-only: pretend the URL carried ?config=<values>.
+                       A headless harness cannot change window.location, and the
+                       URL override is the supported way to reach the locked
+                       behaviours, so it has to be testable. Pass null to clear. */
+                    setUrlOverride: function (values) {
+                        urlOverrideInjected = values || null;
+                        return normalize(lastLoadedJson);
+                    }
+                };
+            })();
+        </script>
+    </body>
+</html>

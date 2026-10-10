@@ -1,0 +1,168 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>hot reload test</title>
+        <style>
+            html, body { margin: 0; background: #14151a; color: #e8e8ea;
+                font: 13px/1.6 Consolas, monospace; }
+            #out { padding: 10px; white-space: pre-wrap; }
+            .ok { color: #6ee7a0; }
+            .fail { color: #ff7a7a; }
+            #frame { width: 620px; height: 320px; border: 1px solid #333; margin: 8px; }
+        </style>
+    </head>
+    <body>
+        <div id="out">running…</div>
+        <script>
+            /*
+             * Proves that changing a setting the way the Dashboard does reaches a
+             * RUNNING overlay without reloading it.
+             *
+             * The Dashboard writes <tosu>/settings/<folder>.values.json and the
+             * overlay polls /api/counters/settings/<folder>. tools/serve.js fakes
+             * that endpoint, so here we POST one value and watch the live overlay.
+             */
+            var out = document.getElementById('out');
+            var lines = [];
+            var failures = 0;
+            var checks = 0;
+
+            function say(text, cls) {
+                lines.push(cls ? '<span class="' + cls + '">' + text + '</span>' : text);
+                out.innerHTML = lines.join('\n');
+            }
+
+            function check(condition, label) {
+                checks++;
+                if (!condition) failures++;
+                say((condition ? 'PASS  ' : 'FAIL  ') + label, condition ? 'ok' : 'fail');
+            }
+
+            function sleep(ms) {
+                return new Promise(function (r) { setTimeout(r, ms); });
+            }
+
+            function setDashboard(payload) {
+                return fetch('/__fake/dashboard', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(function (r) { return r.json(); });
+            }
+
+            (async function run() {
+                await setDashboard({ squareSize: 56, displayText: 'Z\nX\nC\nV', rainFlowSpeed: 400 });
+
+                var frame = document.createElement('iframe');
+                frame.id = 'frame';
+                frame.src = '/keyviewer_awa/index.html';
+                document.body.appendChild(frame);
+                var kv = null;
+                for (var i = 0; i < 120 && !kv; i++) {
+                    await sleep(50);
+                    kv = frame.contentWindow.keyviewer;
+                }
+                if (!kv) { check(false, 'overlay booted'); return finish(); }
+
+                /* wait for the first settings poll to land */
+                for (var w = 0; w < 60; w++) {
+                    await sleep(100);
+                    if (kv.state().settingsSource !== 'defaults') break;
+                }
+                var first = kv.state();
+                say('settings source: ' + first.settingsSource);
+                check(
+                    first.settingsSource.indexOf('tosu') !== -1,
+                    'the overlay reads tosu settings, not only settings.json'
+                );
+                check(first.settings.squareSize === 56, 'squareSize starts at 56');
+                check(
+                    kv.visibility().settingsSocketOpen === true,
+                    'the overlay joined the tosu settings broadcast channel'
+                );
+
+                /* how many HTTP settings reads happened during the test */
+                var httpReadsAtStart = first.settingsUrl ? 1 : 0;
+                say('settings reads so far (rough): ' + httpReadsAtStart);
+
+                /* --- the actual hot reload: change it like the Dashboard does --- */
+                say('');
+                say('=== change squareSize 56 -> 90 in the Dashboard (no reload) ===');
+                await setDashboard({ squareSize: 90 });
+
+                var sawIt = false;
+                for (var t = 0; t < 60; t++) {
+                    await sleep(100);
+                    if (kv.state().settings.squareSize === 90) { sawIt = true; break; }
+                }
+                check(sawIt, 'a running overlay picked up the new squareSize');
+                /* the stage is wide enough that the squares must not be shrunk */
+                check(
+                    kv.state().layout.square > 60,
+                    'the rendered square actually grew',
+                    'layout.square=' + kv.state().layout.square.toFixed(1)
+                );
+
+                var squareEl = frame.contentWindow.document.querySelector('.keyviewer-key');
+                check(
+                    squareEl && parseFloat(squareEl.style.width) > 60,
+                    'the DOM square grew too',
+                    squareEl ? squareEl.style.width : 'no square'
+                );
+
+                /* --- a second, different setting --- */
+                say('');
+                say('=== change displayText and rainFlowSpeed ===');
+                await setDashboard({ displayText: 'A\nB\nC\nD', rainFlowSpeed: 250 });
+
+                var sawText = false;
+                for (var u = 0; u < 60; u++) {
+                    await sleep(100);
+                    var s = kv.state();
+                    if (s.settings.rainFlowSpeed === 250 && s.settings.displayText === 'A\nB\nC\nD') {
+                        sawText = true;
+                        break;
+                    }
+                }
+                check(sawText, 'text and rain speed both followed the Dashboard');
+
+                var letters = Array.prototype.map.call(
+                    frame.contentWindow.document.querySelectorAll('.keyv-letter'),
+                    function (el) { return el.textContent; }
+                );
+                var keyState = kv.state().keys;
+                say(
+                    'DOM letters: ' + JSON.stringify(letters) +
+                    ' | key labels: ' + JSON.stringify(keyState.map(function (k) { return k.label; })) +
+                    ' | displays: ' + JSON.stringify(keyState.map(function (k) { return k.display; })) +
+                    ' | settings.displayText: ' + JSON.stringify(kv.state().settings.displayText) +
+                    ' | rebuilds: ' + kv.state().rebuilds
+                );
+                check(
+                    letters.join('') === 'ABCD',
+                    'the squares show the new display text',
+                    JSON.stringify(letters)
+                );
+
+                /* --- the square count must stay fixed at four --- */
+                check(letters.length === 4, 'the overlay still shows exactly four squares');
+
+                finish();
+            })().catch(function (error) {
+                check(false, 'test threw: ' + error.message);
+                finish();
+            });
+
+            function finish() {
+                say('');
+                say(
+                    (checks - failures) + '/' + checks + ' checks passed' +
+                        (failures ? '  <-- ' + failures + ' FAILED' : '  (all good)'),
+                    failures ? 'fail' : 'ok'
+                );
+                window.__testResult = { checks: checks, failures: failures };
+            }
+        </script>
+    </body>
+</html>

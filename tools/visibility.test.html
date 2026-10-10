@@ -1,0 +1,335 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>visibility + settings channel test</title>
+        <style>
+            html, body { margin: 0; background: #14151a; color: #e8e8ea;
+                font: 13px/1.6 Consolas, monospace; }
+            #out { padding: 10px; white-space: pre-wrap; }
+            .ok { color: #6ee7a0; }
+            .fail { color: #ff7a7a; }
+        </style>
+    </head>
+    <body>
+        <div id="out">running…</div>
+        <script>
+            /*
+             * End to end checks for the two things that were wrong on the user's box:
+             *
+             *  1. settings must reach a RUNNING overlay through tosu's broadcast
+             *     channel instead of a fast HTTP poll (the poll flooded the tosu log
+             *     with "Settings accessed" and kept the server busy)
+             *  2. "show only while playing" must hide the overlay in the menus and
+             *     show it during a map
+             */
+            var out = document.getElementById('out');
+            var lines = [];
+            var failures = 0;
+            var checks = 0;
+
+            function say(text, cls) {
+                lines.push(cls ? '<span class="' + cls + '">' + text + '</span>' : text);
+                out.innerHTML = lines.join('\n');
+            }
+
+            function check(condition, label, detail) {
+                checks++;
+                if (!condition) failures++;
+                say(
+                    (condition ? 'PASS  ' : 'FAIL  ') + label + (detail ? '   [' + detail + ']' : ''),
+                    condition ? 'ok' : 'fail'
+                );
+            }
+
+            function sleep(ms) {
+                return new Promise(function (r) { setTimeout(r, ms); });
+            }
+
+            function setState(name, number) {
+                return fetch('/__fake/state', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, number: number })
+                }).then(function (r) { return r.json(); });
+            }
+
+            function setDashboard(payload) {
+                return fetch('/__fake/dashboard', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(function (r) { return r.json(); });
+            }
+
+            function loadOverlay(config) {
+                return new Promise(function (resolve) {
+                    var old = document.getElementById('frame');
+                    if (old) old.remove();
+
+                    var frame = document.createElement('iframe');
+                    frame.id = 'frame';
+                    frame.style.cssText = 'width:420px;height:320px;border:1px solid #333';
+                    /* The usual tosu counter URL. Deliberately no ?config here: a URL
+                       override beats the Dashboard, which would mask every value this
+                       test sets. */
+                    frame.src = '/keyviewer_awa/';
+                    document.body.appendChild(frame);
+
+                    var waited = 0;
+                    (function ready() {
+                        var kv = frame.contentWindow.keyviewer;
+                        if (kv) return resolve({ frame: frame, kv: kv });
+                        if ((waited += 50) > 6000) return resolve(null);
+                        setTimeout(ready, 50);
+                    })();
+                });
+            }
+
+            (async function run() {
+                /* ---------- 1. the settings channel ---------- */
+                say('=== 1. a running overlay follows Dashboard saves (broadcast) ===');
+                /* start from a clean Dashboard, like a fresh install */
+                await fetch('/__fake/reset', { method: 'POST' });
+                await setDashboard({ squareSize: 56, displayText: 'Z\nX\nC\nV' });
+                var a = await loadOverlay({ inputMode: 'game', gameSlots: 'k1\nk2\nm1\nm2' });
+                if (!a) { check(false, 'overlay booted'); return finish(); }
+
+                for (var i = 0; i < 60; i++) {
+                    await sleep(100);
+                    if (a.kv.state().settingsSource !== 'defaults') break;
+                }
+                say('  settings source: ' + a.kv.state().settingsSource);
+                check(
+                    a.kv.visibility().settingsSocketOpen === true,
+                    'overlay joined the tosu settings channel'
+                );
+
+                await sleep(2000);
+                var readsBefore = await countSettingsReads();
+                await setDashboard({ squareSize: 74 });
+                await sleep(1500);
+                var st = a.kv.state();
+                say('  after save: settingsSource=' + st.settingsSource +
+                    ' squareSize=' + st.settings.squareSize);
+                var grew = false;
+                for (var g = 0; g < 60; g++) {
+                    await sleep(100);
+                    if (a.kv.state().settings.squareSize === 74) { grew = true; break; }
+                }
+                check(grew, 'a live overlay picked up squareSize=74 with no reload');
+                check(
+                    parseFloat(
+                        a.frame.contentWindow.document.querySelector('.keyviewer-key').style.width
+                    ) === 74,
+                    'the DOM square is 74px'
+                );
+
+                var readsAfter = await countSettingsReads();
+                check(
+                    readsAfter - readsBefore <= 3,
+                    'one save caused at most a few settings reads',
+                    readsBefore + ' -> ' + readsAfter
+                );
+
+                /* ---------- 2. show only while playing ---------- */
+                say('');
+                say('=== 2. showDuringPlay hides the overlay outside a map ===');
+                await setDashboard({ showDuringPlay: true });
+                await sleep(500);
+                await setState('selectPlay', 5);
+
+                var b = await loadOverlay({ inputMode: 'game', gameSlots: 'k1\nk2\nm1\nm2' });
+                if (!b) { check(false, 'overlay booted'); return finish(); }
+
+                /* a fresh overlay needs a moment to read its settings and open its
+                   sockets before its visibility means anything */
+                var settledB = false;
+                for (var q = 0; q < 80; q++) {
+                    await sleep(100);
+                    if (b.kv.state().settings.showDuringPlay === true) { settledB = true; break; }
+                }
+                check(settledB, 'the fresh overlay read showDuringPlay=true',
+                    String(b.kv.state().settings.showDuringPlay));
+
+                var hiddenAtSelect = false;
+                for (var s = 0; s < 80; s++) {
+                    await sleep(100);
+                    if (b.kv.visibility().hidden) { hiddenAtSelect = true; break; }
+                }
+                check(hiddenAtSelect, 'hidden in the song select screen',
+                    'state=' + b.kv.visibility().state);
+
+                var host = b.frame.contentWindow.document.getElementById('overlay_host');
+                check(
+                    host.style.display === 'none',
+                    'the whole overlay element is display:none',
+                    host.style.display
+                );
+
+                await setState('play', 2);
+                var shownInPlay = false;
+                for (var p = 0; p < 60; p++) {
+                    await sleep(100);
+                    if (b.kv.visibility().hidden === false) { shownInPlay = true; break; }
+                }
+                check(shownInPlay, 'visible once the map starts',
+                    'state=' + b.kv.visibility().state);
+                check(
+                    host.style.display === 'block',
+                    'the overlay element is display:block again',
+                    host.style.display
+                );
+
+                /* keys must still work while it is shown */
+                await fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ k1: true })
+                });
+                var lit = false;
+                for (var k = 0; k < 40; k++) {
+                    await sleep(100);
+                    if (b.kv.state().keys[0].pressed) { lit = true; break; }
+                }
+                check(lit, 'keys still light up during the map');
+
+                await fetch('/__fake/keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ k1: false, k2: false, m1: false, m2: false })
+                });
+
+                await setState('resultScreen', 7);
+                var hiddenAtResult = false;
+                for (var r = 0; r < 60; r++) {
+                    await sleep(100);
+                    if (b.kv.visibility().hidden) { hiddenAtResult = true; break; }
+                }
+                check(hiddenAtResult, 'hidden again on the result screen');
+
+                /* ---------- 3. switch off means always visible ---------- */
+                say('');
+                say('=== 3. with the switch off it is always visible ===');
+                await setDashboard({ showDuringPlay: false });
+                await setState('menu', 0);
+
+                var always = false;
+                for (var w = 0; w < 60; w++) {
+                    await sleep(100);
+                    var v = b.kv.visibility();
+                    if (v.hidden === false && v.state === 'menu') { always = true; break; }
+                }
+                check(always, 'visible in the main menu when the switch is off');
+
+                /* ---------- 4. a partial save must not wipe other settings ---------- */
+                say('');
+                say('=== 4. a partial Dashboard save keeps every other setting ===');
+
+                await setDashboard({
+                    displayText: 'X\nC\n.\n/',
+                    borderColor: '#ff0000',
+                    borderOpacity: 40,
+                    rainFlowSpeed: 250,
+                    squareSize: 74
+                });
+                await sleep(600);
+
+                var before = b.kv.state().settings;
+                check(before.displayText === 'X\nC\n.\n/', 'the custom display text is applied',
+                    JSON.stringify(before.displayText));
+
+                /* now change ONE key, exactly like a real Dashboard save */
+                await setDashboard({ squareSize: 91 });
+                var after = null;
+                for (var u = 0; u < 60; u++) {
+                    await sleep(100);
+                    after = b.kv.state().settings;
+                    if (after.squareSize === 91) break;
+                }
+                say('  after one-key save: displayText=' + JSON.stringify(after.displayText) +
+                    ' border=' + after.borderColor +
+                    ' opacity=' + after.borderOpacity +
+                    ' rainSpeed=' + after.rainFlowSpeed +
+                    ' showDuringPlay=' + after.showDuringPlay);
+
+                check(after.squareSize === 91, 'the changed key was applied');
+                check(after.displayText === 'X\nC\n.\n/',
+                    'displayText survived the one-key save', JSON.stringify(after.displayText));
+                check(after.borderColor === '#ff0000',
+                    'borderColor survived', after.borderColor);
+                check(after.borderOpacity === 40,
+                    'borderOpacity survived', String(after.borderOpacity));
+                check(after.rainFlowSpeed === 250,
+                    'rainFlowSpeed survived', String(after.rainFlowSpeed));
+                check(after.showDuringPlay === false,
+                    'showDuringPlay survived (still off)', String(after.showDuringPlay));
+
+                var readsNow = await countSettingsReads();
+                check(readsNow === 0 || readsNow <= 2,
+                    'partial saves did not trigger repeated settings reads',
+                    String(readsNow));
+
+                /* ---------- 5. no state socket while the switch is off ---------- */
+                say('');
+                say('=== 5. the state connection is only opened when needed ===');
+
+                /* A socket close is asynchronous, so give the server a moment to
+                   notice. This is about which endpoints stay open, not about
+                   instant teardown. */
+                var info = null;
+                for (var e = 0; e < 40; e++) {
+                    await sleep(100);
+                    info = await (await fetch('/__fake/state')).json();
+                    if (info.dataPaths.indexOf('/websocket/v2') === -1) break;
+                }
+                say('  open data endpoints: ' + JSON.stringify(info.dataPaths));
+                check(
+                    info.dataPaths.indexOf('/websocket/v2') === -1,
+                    'no /websocket/v2 while the switch is off (keys stay on precise)',
+                    JSON.stringify(info.dataPaths)
+                );
+                check(
+                    info.dataPaths.indexOf('/websocket/v2/precise') !== -1,
+                    'the key stream is on /websocket/v2/precise',
+                    JSON.stringify(info.dataPaths)
+                );
+
+                /* ---------- 6. no polling: settings arrive by broadcast ---------- */
+                say('');
+                say('=== 6. the overlay does not poll the settings endpoint ===');
+                var before6 = info.settingsReads;
+                await sleep(6000);
+                var after6 = (await (await fetch('/__fake/state')).json()).settingsReads;
+                say('  settings reads during 6 idle seconds: ' + (after6 - before6));
+                check(
+                    after6 === before6,
+                    'six idle seconds caused zero settings reads',
+                    before6 + ' -> ' + after6
+                );
+
+                finish();
+            })().catch(function (error) {
+                check(false, 'test threw: ' + error.message);
+                finish();
+            });
+
+            /* the fake server counts how many settings reads it served */
+            async function countSettingsReads() {
+                var response = await fetch('/__fake/state');
+                var json = await response.json();
+                return json.settingsReads || 0;
+            }
+
+            function finish() {
+                say('');
+                say(
+                    (checks - failures) + '/' + checks + ' checks passed' +
+                        (failures ? '  <-- ' + failures + ' FAILED' : '  (all good)'),
+                    failures ? 'fail' : 'ok'
+                );
+                window.__testResult = { checks: checks, failures: failures };
+            }
+        </script>
+    </body>
+</html>
